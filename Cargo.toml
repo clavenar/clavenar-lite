@@ -1,0 +1,55 @@
+[package]
+name = "warden-lite"
+version = "0.1.0"
+edition = "2024"
+description = "Community Edition of Agent Warden — single-binary OSS proxy with embedded heuristic Brain, Rego policy engine, and SHA-256 hash-chained ledger."
+license = "Apache-2.0"
+repository = "https://github.com/vanteguardlabs/warden-lite"
+readme = "README.md"
+keywords = ["ai", "agent", "security", "proxy", "policy"]
+categories = ["command-line-utilities", "network-programming"]
+
+[[bin]]
+name = "warden-lite"
+path = "src/main.rs"
+
+[lib]
+name = "warden_lite"
+path = "src/lib.rs"
+
+[dependencies]
+# HTTP server + extractors. Same axum/tokio pair as the full edition; keeps
+# the wire shape identical so an agent already pointed at a full warden-proxy
+# can be redirected to lite without code changes on the agent side.
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower = "0.4"
+# Outbound HTTP to the configured upstream LLM/tool endpoint. rustls-tls
+# instead of native-tls so a static cargo install on a fresh box doesn't
+# need a system openssl. `json` for ergonomic body posting.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Pure-Rust Rego — same engine as the full edition's policy-engine, so
+# governance.rego works verbatim. No OPA binary to ship.
+regorus = "0.2"
+# SQLite for the embedded ledger. `bundled` so users don't need a system
+# libsqlite3 — the cargo install is genuinely one command.
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+# SHA-256 for the hash chain. Same algorithm as warden-ledger so a chain
+# produced by lite can be verified by code from the full edition (and vice
+# versa).
+sha2 = "0.10"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+async-trait = "0.1"
+
+[dev-dependencies]
+# Spawning a stub upstream from integration tests.
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
