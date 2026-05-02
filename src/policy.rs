@@ -62,7 +62,7 @@ pub struct PolicyDecision {
     pub allow: bool,
     pub reasons: Vec<String>,
     /// In the full edition, non-empty `review_reasons` route the request
-    /// to warden-hitl for human approval. Lite has no HITL, so we treat
+    /// to warden-hil for human approval. Lite has no HIL, so we treat
     /// any review match as a soft-deny — surfaced in the response but
     /// not auto-approved.
     #[serde(default)]
