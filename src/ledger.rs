@@ -48,6 +48,17 @@ use uuid::Uuid;
 pub const GENESIS_PREV_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
+/// Lite shares the chain format with the full edition; the constant
+/// is duplicated here (rather than reaching into `warden-ledger`) so
+/// Lite stays a single-binary, no-deps OSS edition. Keep it in sync
+/// with `warden_ledger::CURRENT_CHAIN_VERSION` — the chains are
+/// wire-compatible by construction. WG-302.
+pub const CURRENT_CHAIN_VERSION: i64 = 1;
+
+fn default_chain_version() -> i64 {
+    1
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LedgerEntry {
     pub id: Uuid,
@@ -61,6 +72,10 @@ pub struct LedgerEntry {
     pub seq: i64,
     pub prev_hash: String,
     pub entry_hash: String,
+    /// Chain version under which `entry_hash` was computed (WG-302).
+    /// Defaults to 1 on the wire so pre-WG-302 shapes still parse.
+    #[serde(default = "default_chain_version")]
+    pub chain_version: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -73,12 +88,12 @@ pub struct LogRequest {
     pub policy_decision: Option<serde_json::Value>,
 }
 
-/// Body that participates in the hash. Field order here is the canonical
-/// serialization order — do not reorder without bumping the chain
-/// version. Identical layout to `warden_ledger::HashableEntry` so a
-/// chain produced by Lite verifies under the full edition.
+/// V1 hash input. Identical layout to `warden_ledger::HashableEntryV1`
+/// so a chain produced by Lite verifies under the full edition.
+/// **Do not edit** — bump `CURRENT_CHAIN_VERSION` and add a
+/// `HashableEntryV2<'a>` instead. WG-302.
 #[derive(Serialize)]
-struct HashableEntry<'a> {
+struct HashableEntryV1<'a> {
     id: &'a Uuid,
     timestamp: &'a DateTime<Utc>,
     agent_id: &'a str,
@@ -96,6 +111,11 @@ pub struct VerifyResult {
     pub valid: bool,
     pub entries_checked: usize,
     pub first_invalid_seq: Option<i64>,
+    /// Set when the verifier hits a row whose chain_version this
+    /// binary doesn't know how to verify (WG-302). Distinguishable
+    /// from a tamper, which sets `first_invalid_seq` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_chain_version: Option<i64>,
 }
 
 pub struct Ledger {
@@ -133,45 +153,10 @@ impl Ledger {
         let id = Uuid::new_v4();
         let timestamp = Utc::now();
 
-        let hashable = HashableEntry {
-            id: &id,
-            timestamp: &timestamp,
-            agent_id: &req.agent_id,
-            method: &req.method,
-            intent_category: &req.intent_category,
-            authorized: req.authorized,
-            reasoning: &req.reasoning,
-            policy_decision: &req.policy_decision,
-            seq: next_seq,
-            prev_hash: &prev_hash,
-        };
-        let entry_hash = compute_entry_hash(&hashable);
-
-        let policy_decision_json = req
-            .policy_decision
-            .as_ref()
-            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()));
-
-        conn.execute(
-            "INSERT INTO entries (id, seq, timestamp, agent_id, method, intent_category,
-                                  authorized, reasoning, policy_decision, prev_hash, entry_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            rusqlite::params![
-                id.to_string(),
-                next_seq,
-                timestamp.to_rfc3339(),
-                req.agent_id,
-                req.method,
-                req.intent_category,
-                req.authorized as i64,
-                req.reasoning,
-                policy_decision_json,
-                prev_hash,
-                entry_hash,
-            ],
-        )?;
-
-        Ok(LedgerEntry {
+        // Build a typed entry first; `recompute_for_version` then hashes
+        // off the same view that `verify_chain` will read back from
+        // disk. Single source of truth for both write and verify paths.
+        let mut entry = LedgerEntry {
             id,
             timestamp,
             agent_id: req.agent_id,
@@ -182,8 +167,39 @@ impl Ledger {
             policy_decision: req.policy_decision,
             seq: next_seq,
             prev_hash,
-            entry_hash,
-        })
+            entry_hash: String::new(),
+            chain_version: CURRENT_CHAIN_VERSION,
+        };
+        entry.entry_hash = recompute_for_version(entry.chain_version, &entry)
+            .expect("CURRENT_CHAIN_VERSION must be supported by this binary");
+
+        let policy_decision_json = entry
+            .policy_decision
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()));
+
+        conn.execute(
+            "INSERT INTO entries (id, seq, timestamp, agent_id, method, intent_category,
+                                  authorized, reasoning, policy_decision, prev_hash, entry_hash,
+                                  chain_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                entry.id.to_string(),
+                entry.seq,
+                entry.timestamp.to_rfc3339(),
+                entry.agent_id,
+                entry.method,
+                entry.intent_category,
+                entry.authorized as i64,
+                entry.reasoning,
+                policy_decision_json,
+                entry.prev_hash,
+                entry.entry_hash,
+                entry.chain_version,
+            ],
+        )?;
+
+        Ok(entry)
     }
 
     /// Walk every entry in seq order, recompute each hash, and confirm
@@ -194,7 +210,7 @@ impl Ledger {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, seq, timestamp, agent_id, method, intent_category, authorized,
-                    reasoning, policy_decision, prev_hash, entry_hash
+                    reasoning, policy_decision, prev_hash, entry_hash, chain_version
              FROM entries ORDER BY seq ASC",
         )?;
         let mut rows = stmt.query([])?;
@@ -202,36 +218,35 @@ impl Ledger {
         let mut expected_prev = GENESIS_PREV_HASH.to_string();
         let mut count = 0usize;
         let mut first_invalid: Option<i64> = None;
+        let mut unsupported_chain_version: Option<i64> = None;
 
         while let Some(row) = rows.next()? {
             let entry = row_to_entry(row)?;
-            let policy_decision = entry.policy_decision.clone();
-            let hashable = HashableEntry {
-                id: &entry.id,
-                timestamp: &entry.timestamp,
-                agent_id: &entry.agent_id,
-                method: &entry.method,
-                intent_category: &entry.intent_category,
-                authorized: entry.authorized,
-                reasoning: &entry.reasoning,
-                policy_decision: &policy_decision,
-                seq: entry.seq,
-                prev_hash: &entry.prev_hash,
+            // WG-302 dispatch: if this row was written under a chain
+            // version this binary doesn't know, stop the walk and
+            // surface the version separately. We can't validate any
+            // row that chains off an unverifiable hash anyway.
+            let recomputed = match recompute_for_version(entry.chain_version, &entry) {
+                Some(h) => h,
+                None => {
+                    unsupported_chain_version = Some(entry.chain_version);
+                    break;
+                }
             };
-            let recomputed = compute_entry_hash(&hashable);
-            count += 1;
 
             if entry.prev_hash != expected_prev || recomputed != entry.entry_hash {
                 first_invalid = Some(entry.seq);
                 break;
             }
             expected_prev = entry.entry_hash;
+            count += 1;
         }
 
         Ok(VerifyResult {
-            valid: first_invalid.is_none(),
+            valid: first_invalid.is_none() && unsupported_chain_version.is_none(),
             entries_checked: count,
             first_invalid_seq: first_invalid,
+            unsupported_chain_version,
         })
     }
 
@@ -241,7 +256,7 @@ impl Ledger {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, seq, timestamp, agent_id, method, intent_category, authorized,
-                    reasoning, policy_decision, prev_hash, entry_hash
+                    reasoning, policy_decision, prev_hash, entry_hash, chain_version
              FROM entries WHERE agent_id = ?1 ORDER BY seq ASC",
         )?;
         let rows = stmt.query_map([agent_id], row_to_entry)?;
@@ -268,20 +283,68 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             reasoning TEXT NOT NULL,
             policy_decision TEXT,
             prev_hash TEXT NOT NULL,
-            entry_hash TEXT NOT NULL
+            entry_hash TEXT NOT NULL,
+            chain_version INTEGER NOT NULL DEFAULT 1
          );
          CREATE INDEX IF NOT EXISTS idx_entries_agent_id ON entries(agent_id);
          CREATE INDEX IF NOT EXISTS idx_entries_seq ON entries(seq);",
-    )
+    )?;
+
+    // Idempotent migration for legacy DBs. Same shape as the full
+    // edition's `ALTER TABLE ADD COLUMN`. Default 1 is the only safe
+    // value for pre-WG-302 rows — they were all written under v1.
+    fn has_column(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+        let mut stmt = conn.prepare("PRAGMA table_info(entries)")?;
+        let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for n in names {
+            if n? == name {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    if !has_column(conn, "chain_version")? {
+        conn.execute(
+            "ALTER TABLE entries ADD COLUMN chain_version INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
-fn compute_entry_hash(hashable: &HashableEntry<'_>) -> String {
-    let canonical = serde_json::to_vec(hashable).expect("HashableEntry always serializes");
+/// V1 hash function. **Do not edit** once a v2 ships — historical
+/// rows must keep verifying through this exact path.
+fn compute_entry_hash_v1(hashable: &HashableEntryV1<'_>) -> String {
+    let canonical = serde_json::to_vec(hashable).expect("HashableEntryV1 always serializes");
     let mut hasher = Sha256::new();
     hasher.update(hashable.prev_hash.as_bytes());
     hasher.update(b"|");
     hasher.update(&canonical);
     hex::encode(hasher.finalize())
+}
+
+/// Per-version dispatch shared by `append` (write) and `verify`
+/// (read-back). `None` => the requested version is newer than this
+/// binary; the caller surfaces that as `unsupported_chain_version`.
+fn recompute_for_version(version: i64, entry: &LedgerEntry) -> Option<String> {
+    match version {
+        1 => {
+            let hashable = HashableEntryV1 {
+                id: &entry.id,
+                timestamp: &entry.timestamp,
+                agent_id: &entry.agent_id,
+                method: &entry.method,
+                intent_category: &entry.intent_category,
+                authorized: entry.authorized,
+                reasoning: &entry.reasoning,
+                policy_decision: &entry.policy_decision,
+                seq: entry.seq,
+                prev_hash: &entry.prev_hash,
+            };
+            Some(compute_entry_hash_v1(&hashable))
+        }
+        _ => None,
+    }
 }
 
 fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
@@ -308,6 +371,9 @@ fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
             .map(|s| serde_json::from_str(&s).unwrap_or(serde_json::Value::Null)),
         prev_hash: row.get(9)?,
         entry_hash: row.get(10)?,
+        // Column 11 is INTEGER NOT NULL DEFAULT 1 — the migration
+        // backfills `1` for legacy rows.
+        chain_version: row.get(11)?,
     })
 }
 
