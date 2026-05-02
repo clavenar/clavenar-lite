@@ -183,7 +183,7 @@ async fn sql_execute_policy_blocked() {
 
 #[tokio::test]
 async fn wire_transfer_soft_denied_in_lite() {
-    // In the full edition, this routes to warden-hitl. In Lite we
+    // In the full edition, this routes to warden-hil. In Lite we
     // surface the review-tier reason in the response and return 403
     // — there's no human in the loop.
     let upstream = spawn_stub_upstream().await;

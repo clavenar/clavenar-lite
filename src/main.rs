@@ -38,7 +38,7 @@ use warden_lite::proxy::{build_router, AppState};
     version,
     long_about = "Embedded heuristic Brain + Rego policy engine + SHA-256 hash-chained SQLite ledger in one binary. \
                   Designed for developer-laptop use. \
-                  For production deployments (mTLS, Vault, multi-instance, HITL, semantic LLM-based detection), \
+                  For production deployments (mTLS, Vault, multi-instance, HIL, semantic LLM-based detection), \
                   see the full Agent Warden edition."
 )]
 struct Cli {

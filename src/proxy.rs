@@ -15,7 +15,7 @@
 //!
 //! This is the security-first orchestration model from the full
 //! `warden-proxy` (post-2026-05-02). There's no race, no Yellow-tier
-//! HITL roundtrip, and no Vault — Lite is for developer-laptop use
+//! HIL roundtrip, and no Vault — Lite is for developer-laptop use
 //! where the agent already has its own creds.
 //!
 //! # Authentication

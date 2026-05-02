@@ -159,10 +159,10 @@ Lite is for developer-laptop use. It deliberately omits:
   edition pulls per-agent credentials from HashiCorp Vault on every
   request, so a leaked agent process can't exfiltrate the upstream
   key.
-- **Human-in-the-Loop (HITL).** Yellow-tier requests
+- **Human-in-the-Loop (HIL).** Yellow-tier requests
   (e.g. `wire_transfer`) are *soft-denied* in Lite — the response
   carries the review reason and the request is rejected. The full
-  edition's `warden-hitl` orchestrator routes these to a Slack /
+  edition's `warden-hil` orchestrator routes these to a Slack /
   Teams approval flow with a human approver and resumes upstream
   forward on Approved.
 - **Multi-instance velocity tracking.** Lite's tracker is in-process.

@@ -2,7 +2,7 @@
 #
 # Loaded by warden-lite at startup. The Rust evaluator queries
 # `data.warden.authz.allow` (bool) and `data.warden.authz.deny` (set[string]).
-# `data.warden.authz.review` is also queried but in Lite there is no HITL
+# `data.warden.authz.review` is also queried but in Lite there is no HIL
 # orchestrator — review-tier matches are reported in the response and
 # treated as a soft-deny (returned as 403 with a "Review" prefix). The
 # reason strings here are part of the audit surface — keep them stable.
@@ -63,8 +63,8 @@ deny contains msg if {
 }
 
 # --- Yellow tier (in Lite: soft-deny) ---
-# In the full edition these route to the warden-hitl orchestrator for human
-# approval. Lite has no HITL — review-tier matches are surfaced to the
+# In the full edition these route to the warden-hil orchestrator for human
+# approval. Lite has no HIL — review-tier matches are surfaced to the
 # operator (logged + returned in the deny reason) and the request is
 # rejected. If you need actual human-in-the-loop flows, ship to the full
 # Agent Warden edition.
