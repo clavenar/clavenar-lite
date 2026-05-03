@@ -52,7 +52,7 @@ pub const GENESIS_PREV_HASH: &str =
 /// is duplicated here (rather than reaching into `warden-ledger`) so
 /// Lite stays a single-binary, no-deps OSS edition. Keep it in sync
 /// with `warden_ledger::CURRENT_CHAIN_VERSION` — the chains are
-/// wire-compatible by construction. WG-302.
+/// wire-compatible by construction.
 pub const CURRENT_CHAIN_VERSION: i64 = 1;
 
 fn default_chain_version() -> i64 {
@@ -72,8 +72,8 @@ pub struct LedgerEntry {
     pub seq: i64,
     pub prev_hash: String,
     pub entry_hash: String,
-    /// Chain version under which `entry_hash` was computed (WG-302).
-    /// Defaults to 1 on the wire so pre-WG-302 shapes still parse.
+    /// Chain version under which `entry_hash` was computed.
+    /// Defaults to 1 on the wire so legacy shapes still parse.
     #[serde(default = "default_chain_version")]
     pub chain_version: i64,
 }
@@ -91,7 +91,7 @@ pub struct LogRequest {
 /// V1 hash input. Identical layout to `warden_ledger::HashableEntryV1`
 /// so a chain produced by Lite verifies under the full edition.
 /// **Do not edit** — bump `CURRENT_CHAIN_VERSION` and add a
-/// `HashableEntryV2<'a>` instead. WG-302.
+/// `HashableEntryV2<'a>` instead.
 #[derive(Serialize)]
 struct HashableEntryV1<'a> {
     id: &'a Uuid,
@@ -112,7 +112,7 @@ pub struct VerifyResult {
     pub entries_checked: usize,
     pub first_invalid_seq: Option<i64>,
     /// Set when the verifier hits a row whose chain_version this
-    /// binary doesn't know how to verify (WG-302). Distinguishable
+    /// binary doesn't know how to verify. Distinguishable
     /// from a tamper, which sets `first_invalid_seq` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsupported_chain_version: Option<i64>,
@@ -222,7 +222,7 @@ impl Ledger {
 
         while let Some(row) = rows.next()? {
             let entry = row_to_entry(row)?;
-            // WG-302 dispatch: if this row was written under a chain
+            // Chain-version dispatch: if this row was written under a chain
             // version this binary doesn't know, stop the walk and
             // surface the version separately. We can't validate any
             // row that chains off an unverifiable hash anyway.
@@ -292,7 +292,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
     // Idempotent migration for legacy DBs. Same shape as the full
     // edition's `ALTER TABLE ADD COLUMN`. Default 1 is the only safe
-    // value for pre-WG-302 rows — they were all written under v1.
+    // value for legacy rows — they were all written under v1.
     fn has_column(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
         let mut stmt = conn.prepare("PRAGMA table_info(entries)")?;
         let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
