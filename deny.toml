@@ -20,20 +20,22 @@ ignore = [
     # via tonic releases. No safe upgrade exists today.
     "RUSTSEC-2025-0134",
 
-    # bincode is unmaintained (RUSTSEC-2025-0141). Pulled in transitively via
-    # async-nats 0.36 / rustls-native-certs and possibly others. No safe
-    # upgrade. Track the async-nats 0.36 → 0.47 upgrade slice for the
-    # ecosystem-wide cleanup.
+    # bincode is unmaintained (RUSTSEC-2025-0141). The advisory has
+    # `patched = []` — bincode 2.x is also flagged. Pulled in via regorus
+    # (rego policy engine in warden-policy-engine), which has no replacement.
     "RUSTSEC-2025-0141",
 
-    # rustls-webpki 0.102.x vulns (RUSTSEC-2026-0049/0098/0099/0104). Only
-    # pulled in via async-nats 0.36, which pins rustls 0.23 / rustls-webpki
-    # 0.102.8. async-nats 0.47 fixes the transitive constraint. Held until
-    # the bump-async-nats-everywhere slice lands. The proxy mTLS path uses
-    # rustls 0.23.40 / webpki 0.103.13 directly, so the SVID/SPIFFE chain
-    # validation is unaffected — these advisories only fire on the NATS
-    # client TLS path, which today connects to a private NATS we control.
-    "RUSTSEC-2026-0049",
+    # rustls-webpki 0.101.7 vulns (RUSTSEC-2026-0098/0099/0104). The async-nats
+    # 0.36 → 0.47 bump cleared the NATS-side path (and the entirely-different
+    # RUSTSEC-2026-0049 with it), but two other transitive paths remain:
+    #   • warden-console: openidconnect 3.5 → oauth2 4 → reqwest 0.11 → rustls 0.21
+    #   • warden-ledger:  aws-sdk-s3 1 → aws-smithy-http-client 1 → hyper-rustls 0.24 → rustls 0.21
+    # Closes when openidconnect 4.x ships (it picks up rustcrypto/rsa 0.10
+    # at the same time, also clearing RUSTSEC-2023-0071) and aws-smithy migrates
+    # off rustls 0.21. The proxy mTLS path uses rustls 0.23.40 / webpki 0.103.13
+    # directly, so SVID/SPIFFE chain validation is unaffected. The HTTP clients
+    # using the vulnerable webpki here only call out to known IdP / S3 endpoints
+    # — no attacker-controlled certs hit this path in practice.
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
     "RUSTSEC-2026-0104",
