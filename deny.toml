@@ -1,0 +1,103 @@
+# cargo-deny configuration for Agent Warden services.
+# See https://embarkstudios.github.io/cargo-deny/checks/cfg.html
+#
+# Synced verbatim across all 14 Rust repos. Edit warden-specs first if you
+# need to change policy, then mirror into every other repo's deny.toml so
+# CI gates stay uniform.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+# Yanked crates are always denied — the registry yanks for a reason.
+yanked = "deny"
+# RUSTSEC IDs the security team has reviewed and accepted exposure for go
+# here, with a comment naming the issue and the deadline to resolve.
+ignore = [
+    # rustls-pemfile is archived; the only path to remove it is for upstream
+    # tonic 0.12 → 0.13+ to migrate to rustls-pki-types::PemObject. Tracking
+    # via tonic releases. No safe upgrade exists today.
+    "RUSTSEC-2025-0134",
+
+    # bincode is unmaintained (RUSTSEC-2025-0141). Pulled in transitively via
+    # async-nats 0.36 / rustls-native-certs and possibly others. No safe
+    # upgrade. Track the async-nats 0.36 → 0.47 upgrade slice for the
+    # ecosystem-wide cleanup.
+    "RUSTSEC-2025-0141",
+
+    # rustls-webpki 0.102.x vulns (RUSTSEC-2026-0049/0098/0099/0104). Only
+    # pulled in via async-nats 0.36, which pins rustls 0.23 / rustls-webpki
+    # 0.102.8. async-nats 0.47 fixes the transitive constraint. Held until
+    # the bump-async-nats-everywhere slice lands. The proxy mTLS path uses
+    # rustls 0.23.40 / webpki 0.103.13 directly, so the SVID/SPIFFE chain
+    # validation is unaffected — these advisories only fire on the NATS
+    # client TLS path, which today connects to a private NATS we control.
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+
+    # rsa Marvin Attack (RUSTSEC-2023-0071). Pulled in via openidconnect 3.5
+    # (warden-console only). No safe upgrade — RustCrypto's `rsa` crate has
+    # no fixed release. The OIDC token verification path uses RS256 RSA-PKCS1
+    # which is the affected primitive, but the timing sidechannel requires
+    # an attacker controlling network conditions to the IdP — the threat
+    # model assumes a trusted IdP behind the same VPC as the console, so we
+    # accept the residual risk pending an `openidconnect` 4.x bump that
+    # supports rustcrypto/rsa 0.10+ once that ships.
+    "RUSTSEC-2023-0071",
+
+    # paste 1.0 unmaintained (RUSTSEC-2024-0436). Pulled in transitively via
+    # parquet 53/57 (warden-ledger Iceberg export path). No safe upgrade —
+    # parquet hasn't migrated off paste yet. Pure proc-macro code generation;
+    # no runtime impact.
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+version = 2
+# Allow-list: the standard permissive set the Rust ecosystem ships under.
+# GPL/AGPL/LGPL are deliberately omitted — copyleft is a non-starter for
+# code we redistribute as proprietary binaries to design partners.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "0BSD",
+    "MIT-0",
+    "BSL-1.0",
+    "Unlicense",
+    "OpenSSL",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+# Our own first-party crates are unpublished proprietary code; they do not
+# carry a `license =` field and never will. Skip them.
+[licenses.private]
+ignore = true
+
+[bans]
+# Duplicate versions are warned, not denied — the Rust ecosystem produces
+# a lot of them (e.g. multiple windows-sys / hashbrown versions). Promote
+# to "deny" once the dep graph is small enough to keep a clean baseline.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+# Only crates.io is trusted by default. If a per-repo Cargo.toml ever
+# adds a git dep, list its host under `allow-git` here AND grep both
+# sides of the wire (CLAUDE.md → Cross-repo wire contracts).
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
