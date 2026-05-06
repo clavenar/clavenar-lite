@@ -26,3 +26,41 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
+
+  # Supply-chain gate. cargo-deny runs four checks against `deny.toml` at
+  # the repo root: advisories (RUSTSEC vulns + unmaintained), licenses
+  # (allow-list), bans (multiple-version warnings), sources (only
+  # crates.io). The deny.toml file is synced verbatim across all 14 Rust
+  # repos — edit warden-specs first if policy changes, then mirror into
+  # every other repo.
+  supply-chain:
+    name: cargo-deny + cyclonedx SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check all
+
+      # cargo-cyclonedx publishes prebuilt binaries on every release, so
+      # cargo-binstall pulls one in ~3s rather than cargo-installing from
+      # source (~2 min). SBOM lands as `<crate>.cdx.json` at the repo
+      # root; we upload it as a build artifact so reviewers can diff dep
+      # graphs across PRs and so a future release pipeline can attach it
+      # to GitHub releases.
+      - uses: cargo-bins/cargo-binstall@main
+
+      - name: install cargo-cyclonedx
+        run: cargo binstall --no-confirm cargo-cyclonedx
+
+      - name: generate SBOM
+        run: cargo cyclonedx --format json --describe crate
+
+      - name: upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.event.repository.name }}-${{ github.sha }}
+          path: '*.cdx.json'
+          if-no-files-found: error
+          retention-days: 90
