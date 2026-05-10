@@ -23,7 +23,6 @@ path = "src/lib.rs"
 # can be redirected to lite without code changes on the agent side.
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
-tower = "0.4"
 # Outbound HTTP to the configured upstream LLM/tool endpoint. rustls-tls
 # instead of native-tls so a static cargo install on a fresh box doesn't
 # need a system openssl. `json` for ergonomic body posting.

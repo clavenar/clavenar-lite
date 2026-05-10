@@ -308,3 +308,29 @@ async fn malformed_body_returns_400() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 400);
 }
+
+#[tokio::test]
+async fn empty_method_rejected() {
+    // JSON-RPC 2.0 mandates a non-empty `method`. Without the guard an
+    // empty method would slip through Brain/policy as tool_type="" and
+    // match no deny rule.
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, ledger) =
+        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/mcp", lite_addr))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "",
+            "params": { "name": "ping" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+    // Nothing should be appended to the ledger when we reject pre-pipeline.
+    let entries = ledger.entries_for_agent("anonymous").await.unwrap();
+    assert!(entries.is_empty(), "rejected request must not write a ledger row");
+}

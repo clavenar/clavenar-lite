@@ -104,13 +104,18 @@ async fn handle_mcp(
     body: Bytes,
 ) -> Response {
     // Bearer auth (if configured). `Authorization: Bearer <token>` —
-    // any other shape is 401.
+    // any other shape is 401. Compared in constant time so the
+    // matching-prefix length does not leak via response timing.
     if let Some(expected) = &state.bearer_token {
         let supplied = headers
             .get("authorization")
             .and_then(|h| h.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "));
-        if supplied != Some(expected.as_str()) {
+        let ok = match supplied {
+            Some(s) => constant_time_eq(s.as_bytes(), expected.as_bytes()),
+            None => false,
+        };
+        if !ok {
             return (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response();
         }
     }
@@ -125,6 +130,12 @@ async fn handle_mcp(
                 .into_response()
         }
     };
+    // JSON-RPC 2.0 §4: `method` must be a non-empty string. Without
+    // this guard an empty method slides through to Brain / policy as
+    // tool_type="" and matches no rule, silently allowing the request.
+    if parsed.method.is_empty() {
+        return (StatusCode::BAD_REQUEST, "method must be a non-empty string").into_response();
+    }
 
     // `tool_type` is `params.name` when this is a tool call; otherwise
     // we tag it with the JSON-RPC method name itself so the policy
@@ -257,6 +268,20 @@ async fn handle_mcp(
     (out_status, upstream_body).into_response()
 }
 
+/// Byte-equality in time proportional to `expected.len()`. Used for
+/// the bearer-token check so a partial-prefix match isn't detectable
+/// by request latency.
+fn constant_time_eq(supplied: &[u8], expected: &[u8]) -> bool {
+    if supplied.len() != expected.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for i in 0..expected.len() {
+        diff |= supplied[i] ^ expected[i];
+    }
+    diff == 0
+}
+
 /// Concatenate brain + policy reasoning into one audit string.
 fn build_reasoning(brain: &HeuristicVerdict, policy: &PolicyDecision) -> String {
     let policy_reasons = if policy.reasons.is_empty() {
@@ -307,6 +332,15 @@ mod tests {
         let s = build_reasoning(&brain, &policy);
         assert!(s.contains("review"));
         assert!(s.contains("Wire transfers"));
+    }
+
+    #[test]
+    fn constant_time_eq_matches_only_full_value() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secrex"));
+        assert!(!constant_time_eq(b"secre", b"secret"));
+        assert!(!constant_time_eq(b"secret-extra", b"secret"));
+        assert!(constant_time_eq(b"", b""));
     }
 
     #[tokio::test]
