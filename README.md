@@ -65,22 +65,26 @@ warden-lite audit anonymous
 ```
 warden-lite start [--port N] [--upstream URL] [--policies DIR] [--ledger PATH]
                   [--velocity-window SECS] [--token TOKEN]
-                  [--upstream-api-key KEY]
+                  [--upstream-api-key KEY] [--upstream-timeout-secs SECS]
 warden-lite verify [--ledger PATH]
 warden-lite audit  [--ledger PATH] <agent_id>
 ```
 
 Every flag falls back to a `WARDEN_LITE_*` env var:
 
-| Flag                    | Env var                            | Default                  |
-|-------------------------|------------------------------------|--------------------------|
-| `--port`                | `WARDEN_LITE_PORT`                 | 8088                     |
-| `--upstream`            | `WARDEN_LITE_UPSTREAM_URL`         | http://localhost:9000/mcp|
-| `--policies`            | `WARDEN_LITE_POLICY_DIR`           | ./policies               |
-| `--ledger`              | `WARDEN_LITE_LEDGER`               | ./warden-lite.db         |
-| `--velocity-window`     | `WARDEN_LITE_VELOCITY_WINDOW_SECS` | 60                       |
-| `--token`               | `WARDEN_LITE_TOKEN`                | (none — open access)     |
-| `--upstream-api-key`    | `WARDEN_LITE_UPSTREAM_API_KEY`     | (none — pass-through)    |
+| Flag                       | Env var                              | Default                   |
+|----------------------------|--------------------------------------|---------------------------|
+| `--port`                   | `WARDEN_LITE_PORT`                   | 8088                      |
+| `--upstream`               | `WARDEN_LITE_UPSTREAM_URL`           | http://localhost:9000/mcp |
+| `--policies`               | `WARDEN_LITE_POLICY_DIR`             | ./policies                |
+| `--ledger`                 | `WARDEN_LITE_LEDGER`                 | ./warden-lite.db          |
+| `--velocity-window`        | `WARDEN_LITE_VELOCITY_WINDOW_SECS`   | 60                        |
+| `--token`                  | `WARDEN_LITE_TOKEN`                  | (none — open access)      |
+| `--upstream-api-key`       | `WARDEN_LITE_UPSTREAM_API_KEY`       | (none — pass-through)     |
+| `--upstream-timeout-secs`  | `WARDEN_LITE_UPSTREAM_TIMEOUT_SECS`  | 120                       |
+
+The upstream URL is parsed at startup and a typo fails fast with exit
+code `1` rather than 502-ing the first request through.
 
 ## Wire format
 
@@ -169,9 +173,12 @@ Lite is for developer-laptop use. It deliberately omits:
   Run more than one Lite instance and per-agent counts don't share —
   a velocity-burst attacker can horizontally scale around the breaker.
   The full edition has a NATS-KV-backed shared tracker for this.
-- **Cold-tier export** (Iceberg / S3), **chain-version negotiation**,
-  **regulatory export bundles**, and other long-term-retention
-  features — all live in the full edition.
+- **Cold-tier export** (Iceberg / S3), **regulatory export bundles**,
+  and other long-term-retention features — all live in the full
+  edition. Chain-version negotiation *is* in Lite: the ledger writes
+  rows tagged with `chain_version`, and `verify` distinguishes a
+  newer-version row (refuse to verify, prompt upgrade) from an actual
+  tamper (point at the first bad seq).
 
 If any of those bullets are critical to your deployment, ship to the
 full Agent Warden control plane. Lite is the OSS top-of-funnel
