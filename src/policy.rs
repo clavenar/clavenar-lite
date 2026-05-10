@@ -14,15 +14,6 @@
 //!      developer use; the in-process counter is plenty. The
 //!      `recent_request_count` field on `PolicyInput` still exists so
 //!      the same `governance.rego` shape works.
-//!
-//! # Rust idioms in this file
-//!
-//! * `tokio::sync::Mutex` over `std::sync::Mutex` — same reason as the
-//!   full edition: regorus eval holds the guard across an `.await`
-//!   point in the surrounding handler. Held only briefly.
-//! * `regorus::Value::Set` / `Value::Array` matched together — Rego sets
-//!   serialize as either depending on how they were built; we tolerate
-//!   both for forward compatibility with rule changes.
 
 use regorus::{Engine, Value as RegoValue};
 use serde::{Deserialize, Serialize};

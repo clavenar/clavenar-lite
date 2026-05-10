@@ -25,18 +25,6 @@
 //! (fine for `127.0.0.1` developer use). If set, every request must
 //! send `Authorization: Bearer <token>` or it's 401. mTLS is the full
 //! edition's job.
-//!
-//! # Rust idioms in this file
-//!
-//! * `axum::extract::State<Arc<AppState>>` — same shared-state pattern
-//!   the full edition uses. `Arc` so cloning the state into each
-//!   request future is cheap.
-//! * `body: Bytes` — axum extractor that hands the raw request body as
-//!   a contiguous byte buffer. We parse it twice (once to pull
-//!   method+tool, once to forward) without re-allocating.
-//! * `let upstream_resp = state.http.post(...).body(body.clone())` —
-//!   `Bytes` is `Clone`-cheap (it's an Arc'd buffer internally), so the
-//!   forward path doesn't need to re-read the body.
 
 use axum::{
     body::Bytes,

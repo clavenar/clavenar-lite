@@ -25,17 +25,6 @@
 //! prev_hash }`. **The order is the chain version** — reordering
 //! silently invalidates every existing entry. Same order as the full
 //! edition's `HashableEntry`; do not diverge.
-//!
-//! # Rust idioms in this file
-//!
-//! * `Arc<Mutex<Connection>>` — same handle is shared between the proxy
-//!   handler and any future background task. SQLite itself is fine with
-//!   concurrent reads, but the rusqlite `Connection` is `!Sync`, so a
-//!   mutex is the simplest safe-share path.
-//! * `HashableEntry<'a>` with a lifetime — borrowed view used only long
-//!   enough to be canonical-JSON-serialized + hashed. Same trick as the
-//!   full edition's ledger; lets us hash without re-allocating every
-//!   string.
 
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;

@@ -11,15 +11,6 @@
 //! Output shape mirrors what the full Brain emits so the policy-engine
 //! input contract (`PolicyInput { intent_score, ... }`) is identical
 //! between editions.
-//!
-//! # Rust idioms in this file
-//!
-//! * `&[&str]` — a slice of string slices. The `INJECTION_NEEDLES` const
-//!   is `&[&str]`, which means it's a borrow of a static array of static
-//!   string borrows. No heap allocation; everything lives in `.rodata`.
-//! * `text.to_lowercase()` allocates a fresh `String`. We do that once
-//!   per call so the per-needle `.contains` doesn't re-lowercase the
-//!   text twenty times.
 
 use serde::{Deserialize, Serialize};
 
