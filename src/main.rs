@@ -144,6 +144,13 @@ async fn main() {
     std::process::exit(exit_code);
 }
 
+fn open_ledger(path: &str) -> Result<Ledger, i32> {
+    Ledger::open(path).map_err(|e| {
+        eprintln!("error: failed to open ledger {}: {}", path, e);
+        1
+    })
+}
+
 async fn run_start(
     port: u16,
     upstream: String,
@@ -161,12 +168,9 @@ async fn run_start(
         }
     };
 
-    let ledger = match Ledger::open(&ledger_path) {
+    let ledger = match open_ledger(&ledger_path) {
         Ok(l) => Arc::new(l),
-        Err(e) => {
-            eprintln!("error: failed to open ledger {}: {}", ledger_path, e);
-            return 1;
-        }
+        Err(code) => return code,
     };
 
     let state = Arc::new(AppState {
@@ -219,12 +223,9 @@ async fn run_start(
 }
 
 async fn run_verify(ledger_path: String) -> i32 {
-    let ledger = match Ledger::open(&ledger_path) {
+    let ledger = match open_ledger(&ledger_path) {
         Ok(l) => l,
-        Err(e) => {
-            eprintln!("error: failed to open ledger {}: {}", ledger_path, e);
-            return 1;
-        }
+        Err(code) => return code,
     };
     match ledger.verify().await {
         Ok(v) => {
@@ -252,12 +253,9 @@ async fn run_verify(ledger_path: String) -> i32 {
 }
 
 async fn run_audit(ledger_path: String, agent_id: String) -> i32 {
-    let ledger = match Ledger::open(&ledger_path) {
+    let ledger = match open_ledger(&ledger_path) {
         Ok(l) => l,
-        Err(e) => {
-            eprintln!("error: failed to open ledger {}: {}", ledger_path, e);
-            return 1;
-        }
+        Err(code) => return code,
     };
     let entries = match ledger.entries_for_agent(&agent_id).await {
         Ok(es) => es,
