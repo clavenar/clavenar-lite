@@ -19,7 +19,7 @@ use regorus::{Engine, Value as RegoValue};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 /// Input to a policy evaluation. Field-for-field compatible with the full
@@ -67,33 +67,41 @@ pub struct PolicyDecision {
 /// doesn't expose the NATS-KV alternative.
 pub struct VelocityTracker {
     inner: Mutex<std::collections::HashMap<String, std::collections::VecDeque<Instant>>>,
-    window: std::time::Duration,
+    window: Duration,
 }
 
 impl VelocityTracker {
     pub fn new(window_secs: u64) -> Self {
+        Self::with_window(Duration::from_secs(window_secs))
+    }
+
+    fn with_window(window: Duration) -> Self {
         Self {
             inner: Mutex::new(std::collections::HashMap::new()),
-            window: std::time::Duration::from_secs(window_secs),
+            window,
         }
     }
 
-    /// Record a hit for `agent_id`, evict expired entries, return the
-    /// resulting count (including the hit we just inserted).
+    /// Record a hit for `agent_id` and return the resulting in-window
+    /// count (including the hit we just inserted). Each call also
+    /// sweeps stale entries across the whole map and drops any agent
+    /// whose deque emptied out — without that, one-shot agent_ids
+    /// accumulate forever in a long-running process.
     pub async fn record_and_count(&self, agent_id: &str) -> u32 {
         let mut map = self.inner.lock().await;
         let now = Instant::now();
-        let entry = map.entry(agent_id.to_string()).or_default();
-        // Evict expired entries from the front. `pop_front_if` would be
-        // cleaner but isn't stable; this is the same idiom as the full
-        // edition's `InProcessTracker`.
-        while let Some(&front) = entry.front() {
-            if now.duration_since(front) > self.window {
-                entry.pop_front();
-            } else {
-                break;
+        let window = self.window;
+        map.retain(|_, deque| {
+            while let Some(&front) = deque.front() {
+                if now.duration_since(front) > window {
+                    deque.pop_front();
+                } else {
+                    break;
+                }
             }
-        }
+            !deque.is_empty()
+        });
+        let entry = map.entry(agent_id.to_string()).or_default();
         entry.push_back(now);
         entry.len() as u32
     }
@@ -337,6 +345,24 @@ mod tests {
         }
         let count = tracker.record_and_count("burst-agent").await;
         assert_eq!(count, 6);
+    }
+
+    #[tokio::test]
+    async fn velocity_tracker_drops_stale_agent_keys() {
+        // A one-shot agent must not occupy a HashMap slot forever after
+        // its window passes — left unevicted, the map grows unbounded
+        // in a long-running process.
+        let tracker = VelocityTracker::with_window(Duration::from_millis(40));
+        tracker.record_and_count("ghost").await;
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        tracker.record_and_count("alive").await;
+        let map = tracker.inner.lock().await;
+        assert!(
+            !map.contains_key("ghost"),
+            "stale agent retained: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+        assert!(map.contains_key("alive"));
     }
 
     #[tokio::test]
