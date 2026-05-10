@@ -9,18 +9,6 @@
 //! All flags fall back to env vars (`WARDEN_LITE_*`) so you can drop a
 //! `.env` next to the binary and just `warden-lite start`. See
 //! `README.md` for the full env-var matrix.
-//!
-//! # Rust idioms in this file
-//!
-//! * `clap::Parser` derive — turns the `Cli` enum into a fully-featured
-//!   CLI with `--help`, version, error messages, etc. Each subcommand
-//!   variant becomes its own subparser.
-//! * `#[tokio::main]` — wraps `main` in a tokio runtime so we can
-//!   `.await`. The full edition installs a rustls crypto provider here;
-//!   Lite uses `rustls-tls` features on reqwest only (no server-side
-//!   TLS), so we skip that step.
-//! * `std::process::exit(N)` — non-zero exit codes for CI integration:
-//!   `1` on runtime error, `2` on a verify failure (chain corruption).
 
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
