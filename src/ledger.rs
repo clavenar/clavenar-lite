@@ -415,6 +415,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn future_chain_version_surfaces_as_unsupported() {
+        // A row written under a newer chain_version must not be
+        // mis-reported as tampered — verify should set
+        // `unsupported_chain_version` and leave `first_invalid_seq` None.
+        let ledger = Ledger::open(":memory:").unwrap();
+        ledger.append(sample("a", true)).await.unwrap();
+        {
+            let conn = ledger.conn.lock().await;
+            conn.execute(
+                "UPDATE entries SET chain_version = 99 WHERE seq = 1",
+                [],
+            )
+            .unwrap();
+        }
+        let v = ledger.verify().await.unwrap();
+        assert!(!v.valid);
+        assert_eq!(v.first_invalid_seq, None);
+        assert_eq!(v.unsupported_chain_version, Some(99));
+    }
+
+    #[tokio::test]
     async fn tampering_breaks_verification() {
         let ledger = Ledger::open(":memory:").unwrap();
         for _ in 0..3 {
