@@ -168,46 +168,34 @@ impl PolicyEngine {
         };
 
         let mut guard = self.engine.lock().await;
+
+        let deny_with = |reason: String| PolicyDecision {
+            allow: false,
+            reasons: vec![reason],
+            review_reasons: Vec::new(),
+        };
+        let eval = |guard: &mut Engine, rule: &str, label: &str| -> Result<RegoValue, String> {
+            guard
+                .eval_rule(rule.to_string())
+                .map_err(|e| format!("Policy engine error (eval {}): {}", label, e))
+        };
+
         if let Err(e) = guard.set_input_json(&input_json) {
-            return PolicyDecision {
-                allow: false,
-                reasons: vec![format!("Policy engine error (set_input): {}", e)],
-                review_reasons: Vec::new(),
-            };
+            return deny_with(format!("Policy engine error (set_input): {}", e));
         }
 
-        let allow_value = match guard.eval_rule("data.warden.authz.allow".to_string()) {
+        let allow_value = match eval(&mut guard, "data.warden.authz.allow", "allow") {
             Ok(v) => v,
-            Err(e) => {
-                return PolicyDecision {
-                    allow: false,
-                    reasons: vec![format!("Policy engine error (eval allow): {}", e)],
-                    review_reasons: Vec::new(),
-                };
-            }
+            Err(r) => return deny_with(r),
         };
-        let deny_value = match guard.eval_rule("data.warden.authz.deny".to_string()) {
+        let deny_value = match eval(&mut guard, "data.warden.authz.deny", "deny") {
             Ok(v) => v,
-            Err(e) => {
-                return PolicyDecision {
-                    allow: false,
-                    reasons: vec![format!("Policy engine error (eval deny): {}", e)],
-                    review_reasons: Vec::new(),
-                };
-            }
+            Err(r) => return deny_with(r),
         };
-        let review_value = match guard.eval_rule("data.warden.authz.review".to_string()) {
+        let review_value = match eval(&mut guard, "data.warden.authz.review", "review") {
             Ok(v) => v,
-            Err(e) => {
-                return PolicyDecision {
-                    allow: false,
-                    reasons: vec![format!("Policy engine error (eval review): {}", e)],
-                    review_reasons: Vec::new(),
-                };
-            }
+            Err(r) => return deny_with(r),
         };
-        // Drop the lock before doing any further work — the rest of
-        // this function only reads the values we already pulled out.
         drop(guard);
 
         let allow = matches!(allow_value, RegoValue::Bool(true));

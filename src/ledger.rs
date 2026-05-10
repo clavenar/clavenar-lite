@@ -251,12 +251,6 @@ impl Ledger {
         let rows = stmt.query_map([agent_id], row_to_entry)?;
         rows.collect()
     }
-
-    /// Total entries in the ledger. Used by the CLI `verify` summary.
-    pub async fn count(&self) -> rusqlite::Result<i64> {
-        let conn = self.conn.lock().await;
-        conn.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
-    }
 }
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
