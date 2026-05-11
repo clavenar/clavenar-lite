@@ -66,9 +66,14 @@ jobs:
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
           # Pull the lines from "## [VERSION]" up to (not including) the
-          # next "## [" header. If the section is empty, fail the run.
-          awk -v ver="[$VERSION]" \
-              '$0 ~ "^## "ver" -" { flag=1; print; next } /^## \[/ && flag { exit } flag' \
+          # next "## [" header. We use `index($0, hdr)` for a literal
+          # substring match — the alternative regex form ($0 ~ ...)
+          # treats brackets as a character class and silently matches
+          # nothing for `[X.Y.Z]`-style version headers.
+          awk -v hdr="## [$VERSION] -" \
+              'index($0, hdr) == 1 { flag=1; print; next }
+               /^## \[/ && flag { exit }
+               flag' \
               CHANGELOG.md > release-notes.md
           if [ ! -s release-notes.md ]; then
             echo "::error::no CHANGELOG section found for $VERSION"
