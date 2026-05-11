@@ -65,6 +65,12 @@ pub struct LedgerEntry {
     /// Defaults to 1 on the wire so legacy shapes still parse.
     #[serde(default = "default_chain_version")]
     pub chain_version: i64,
+    /// Per-request correlation id surfaced in the `X-Warden-Correlation-Id`
+    /// response header. Deliberately NOT part of {@link HashableEntryV1} —
+    /// it's audit-trail metadata, not a forensic-chain invariant — so adding
+    /// it leaves the chain byte-compatible with the full edition's verifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -75,6 +81,11 @@ pub struct LogRequest {
     pub authorized: bool,
     pub reasoning: String,
     pub policy_decision: Option<serde_json::Value>,
+    /// Caller-generated correlation id (proxy emits one per /mcp). When
+    /// `None` the column is stored as NULL — old code paths that don't
+    /// thread a correlation id continue to work.
+    #[serde(default)]
+    pub correlation_id: Option<String>,
 }
 
 /// V1 hash input. Identical layout to `warden_ledger::HashableEntryV1`
@@ -158,6 +169,7 @@ impl Ledger {
             prev_hash,
             entry_hash: String::new(),
             chain_version: CURRENT_CHAIN_VERSION,
+            correlation_id: req.correlation_id,
         };
         entry.entry_hash = recompute_for_version(entry.chain_version, &entry)
             .expect("CURRENT_CHAIN_VERSION must be supported by this binary");
@@ -170,8 +182,8 @@ impl Ledger {
         conn.execute(
             "INSERT INTO entries (id, seq, timestamp, agent_id, method, intent_category,
                                   authorized, reasoning, policy_decision, prev_hash, entry_hash,
-                                  chain_version)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                  chain_version, correlation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 entry.id.to_string(),
                 entry.seq,
@@ -185,6 +197,7 @@ impl Ledger {
                 entry.prev_hash,
                 entry.entry_hash,
                 entry.chain_version,
+                entry.correlation_id,
             ],
         )?;
 
@@ -199,7 +212,8 @@ impl Ledger {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, seq, timestamp, agent_id, method, intent_category, authorized,
-                    reasoning, policy_decision, prev_hash, entry_hash, chain_version
+                    reasoning, policy_decision, prev_hash, entry_hash, chain_version,
+                    correlation_id
              FROM entries ORDER BY seq ASC",
         )?;
         let mut rows = stmt.query([])?;
@@ -245,7 +259,8 @@ impl Ledger {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT id, seq, timestamp, agent_id, method, intent_category, authorized,
-                    reasoning, policy_decision, prev_hash, entry_hash, chain_version
+                    reasoning, policy_decision, prev_hash, entry_hash, chain_version,
+                    correlation_id
              FROM entries WHERE agent_id = ?1 ORDER BY seq ASC",
         )?;
         let rows = stmt.query_map([agent_id], row_to_entry)?;
@@ -267,15 +282,19 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             policy_decision TEXT,
             prev_hash TEXT NOT NULL,
             entry_hash TEXT NOT NULL,
-            chain_version INTEGER NOT NULL DEFAULT 1
+            chain_version INTEGER NOT NULL DEFAULT 1,
+            correlation_id TEXT
          );
          CREATE INDEX IF NOT EXISTS idx_entries_agent_id ON entries(agent_id);
-         CREATE INDEX IF NOT EXISTS idx_entries_seq ON entries(seq);",
+         CREATE INDEX IF NOT EXISTS idx_entries_seq ON entries(seq);
+         CREATE INDEX IF NOT EXISTS idx_entries_correlation_id ON entries(correlation_id);",
     )?;
 
-    // Idempotent migration for legacy DBs. Same shape as the full
-    // edition's `ALTER TABLE ADD COLUMN`. Default 1 is the only safe
-    // value for legacy rows — they were all written under v1.
+    // Idempotent migrations for legacy DBs. Each ALTER adds one
+    // column if missing; default values match the CREATE TABLE shape.
+    // `chain_version` defaults to 1 (the only chain version legacy
+    // rows could have been written under); `correlation_id` is
+    // nullable because legacy rows never had one.
     fn has_column(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
         let mut stmt = conn.prepare("PRAGMA table_info(entries)")?;
         let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -289,6 +308,13 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "chain_version")? {
         conn.execute(
             "ALTER TABLE entries ADD COLUMN chain_version INTEGER NOT NULL DEFAULT 1",
+            [],
+        )?;
+    }
+    if !has_column(conn, "correlation_id")? {
+        conn.execute("ALTER TABLE entries ADD COLUMN correlation_id TEXT", [])?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_entries_correlation_id ON entries(correlation_id)",
             [],
         )?;
     }
@@ -357,6 +383,8 @@ fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
         // Column 11 is INTEGER NOT NULL DEFAULT 1 — the migration
         // backfills `1` for legacy rows.
         chain_version: row.get(11)?,
+        // Column 12 is nullable; legacy rows return None.
+        correlation_id: row.get(12)?,
     })
 }
 
@@ -372,6 +400,7 @@ mod tests {
             authorized,
             reasoning: "test".to_string(),
             policy_decision: None,
+            correlation_id: None,
         }
     }
 
