@@ -98,6 +98,15 @@ enum Command {
         /// you trust the policies. Env `WARDEN_LITE_MODE`.
         #[arg(long, env = "WARDEN_LITE_MODE", value_parser = parse_mode)]
         mode: Option<WardenMode>,
+
+        /// Optional Slack-incoming-webhook URL. When set, every
+        /// yellow-tier park fires a one-way alert with the
+        /// correlation id, tool, agent, review reasons, and the
+        /// `warden-lite pending decide` command-line. No return path
+        /// — operators decide via CLI or curl. Env
+        /// `WARDEN_LITE_SLACK_WEBHOOK_URL`.
+        #[arg(long, env = "WARDEN_LITE_SLACK_WEBHOOK_URL")]
+        slack_webhook_url: Option<String>,
     },
 
     /// Walk every entry in the ledger and confirm the hash chain is
@@ -203,6 +212,7 @@ async fn main() {
             upstream_api_key,
             upstream_timeout_secs,
             mode,
+            slack_webhook_url,
         } => {
             let port = port.unwrap_or(8088);
             let upstream = upstream.unwrap_or_else(|| "http://localhost:9000/mcp".into());
@@ -223,6 +233,7 @@ async fn main() {
                 upstream_api_key,
                 upstream_timeout,
                 mode,
+                slack_webhook_url,
             })
             .await
         }
@@ -475,6 +486,7 @@ struct StartConfig {
     upstream_api_key: Option<String>,
     upstream_timeout: Duration,
     mode: WardenMode,
+    slack_webhook_url: Option<String>,
 }
 
 /// Parse `--mode` / `WARDEN_LITE_MODE` into a {@link WardenMode}.
@@ -531,13 +543,14 @@ async fn run_start(cfg: StartConfig) -> i32 {
         decide_token: cfg.decide_token.clone(),
         upstream_api_key: cfg.upstream_api_key,
         mode: cfg.mode,
+        slack_webhook_url: cfg.slack_webhook_url.clone(),
     });
 
     let app = build_router(state);
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
 
     tracing::info!(
-        "warden-lite listening on http://{} (mode={}, upstream={}, policies={}, ledger={}, auth={}, decide_auth={}, upstream_timeout={}s)",
+        "warden-lite listening on http://{} (mode={}, upstream={}, policies={}, ledger={}, auth={}, decide_auth={}, slack_alerts={}, upstream_timeout={}s)",
         addr,
         match cfg.mode { WardenMode::Enforce => "enforce", WardenMode::Observe => "observe" },
         cfg.upstream,
@@ -545,6 +558,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
         cfg.ledger_path,
         if cfg.token.is_some() { "bearer-token" } else { "open" },
         if cfg.decide_token.is_some() { "bearer-token" } else { "open" },
+        if cfg.slack_webhook_url.is_some() { "enabled" } else { "off" },
         cfg.upstream_timeout.as_secs(),
     );
 
