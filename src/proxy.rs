@@ -36,10 +36,41 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::heuristics::{self, HeuristicVerdict};
 use crate::ledger::{Ledger, LogRequest};
 use crate::policy::{AgentHistory, PolicyDecision, PolicyEngine, PolicyInput};
+
+const CORRELATION_HEADER: &str = "X-Warden-Correlation-Id";
+
+/// Stamp the standard warden response headers on a response.
+/// `correlation_id` is included unconditionally — even auth-fail and
+/// parse-error responses get one, so partners can trace rejected
+/// attempts through the access log. `mode` is the current
+/// {@link WardenMode}; `would_deny` only matters in observe.
+fn warden_headers(
+    correlation_id: &str,
+    mode: WardenMode,
+    would_deny: bool,
+) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    h.insert(
+        CORRELATION_HEADER,
+        correlation_id.parse().expect("uuid is ascii"),
+    );
+    h.insert(
+        "X-Warden-Mode",
+        mode.as_str().parse().expect("mode is ascii"),
+    );
+    if would_deny {
+        h.insert(
+            "X-Warden-Would-Deny",
+            "true".parse().expect("static ascii"),
+        );
+    }
+    h
+}
 
 /// Enforcement posture. `Enforce` is the default and returns 403 on a
 /// would-deny; `Observe` is the rollout knob — every request forwards
@@ -128,6 +159,12 @@ async fn handle_mcp(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    // Mint the correlation id BEFORE any auth check so every response
+    // — including 401s — carries a trace id. Partners filter the
+    // ledger by this id from the X-Warden-Correlation-Id header on
+    // the throw they catch SDK-side.
+    let correlation_id = Uuid::new_v4().to_string();
+
     // Bearer auth (if configured). `Authorization: Bearer <token>` —
     // any other shape is 401. Compared in constant time so the
     // matching-prefix length does not leak via response timing.
@@ -141,7 +178,12 @@ async fn handle_mcp(
             None => false,
         };
         if !ok {
-            return (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response();
+            return (
+                StatusCode::UNAUTHORIZED,
+                warden_headers(&correlation_id, state.mode, false),
+                "missing or invalid bearer token",
+            )
+                .into_response();
         }
     }
 
@@ -151,15 +193,24 @@ async fn handle_mcp(
     let parsed: McpRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("invalid JSON-RPC body: {}", e))
-                .into_response()
+            return (
+                StatusCode::BAD_REQUEST,
+                warden_headers(&correlation_id, state.mode, false),
+                format!("invalid JSON-RPC body: {}", e),
+            )
+                .into_response();
         }
     };
     // JSON-RPC 2.0 §4: `method` must be a non-empty string. Without
     // this guard an empty method slides through to Brain / policy as
     // tool_type="" and matches no rule, silently allowing the request.
     if parsed.method.is_empty() {
-        return (StatusCode::BAD_REQUEST, "method must be a non-empty string").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            warden_headers(&correlation_id, state.mode, false),
+            "method must be a non-empty string",
+        )
+            .into_response();
     }
 
     // `tool_type` is `params.name` when this is a tool call; otherwise
@@ -199,7 +250,7 @@ async fn handle_mcp(
         agent_id: Some(agent_id.clone()),
         method: Some(parsed.method.clone()),
         recent_request_count: 0,
-        correlation_id: None,
+        correlation_id: Some(correlation_id.clone()),
     };
     let policy: PolicyDecision = state.policy.evaluate(policy_input).await;
 
@@ -229,6 +280,7 @@ async fn handle_mcp(
         authorized: allowed,
         reasoning: combined_reasoning.clone(),
         policy_decision: serde_json::to_value(&policy).ok(),
+        correlation_id: Some(correlation_id.clone()),
     };
     if let Err(e) = state.ledger.append(log_req).await {
         tracing::warn!("ledger append failed: {}", e);
@@ -250,12 +302,12 @@ async fn handle_mcp(
             review_reasons: policy.review_reasons.clone(),
             intent_category: brain.intent_category.clone(),
         };
-        let mut deny_headers = HeaderMap::new();
-        deny_headers.insert(
-            "X-Warden-Mode",
-            state.mode.as_str().parse().expect("mode is ascii"),
-        );
-        return (StatusCode::FORBIDDEN, deny_headers, Json(resp)).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            warden_headers(&correlation_id, state.mode, false),
+            Json(resp),
+        )
+            .into_response();
     }
     // Observe mode falls through to the upstream forward even when
     // the pipeline would have denied — the partner still gets a real
@@ -277,9 +329,10 @@ async fn handle_mcp(
         Err(e) => {
             return (
                 StatusCode::BAD_GATEWAY,
+                warden_headers(&correlation_id, state.mode, would_deny),
                 format!("upstream unreachable: {}", e),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -289,9 +342,10 @@ async fn handle_mcp(
         Err(e) => {
             return (
                 StatusCode::BAD_GATEWAY,
+                warden_headers(&correlation_id, state.mode, would_deny),
                 format!("upstream body read error: {}", e),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -300,18 +354,12 @@ async fn handle_mcp(
     // numeric status; the body rides through as `Bytes`.
     let out_status = StatusCode::from_u16(status.as_u16())
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "X-Warden-Mode",
-        state.mode.as_str().parse().expect("mode is ascii"),
-    );
-    if would_deny {
-        headers.insert(
-            "X-Warden-Would-Deny",
-            "true".parse().expect("static ascii"),
-        );
-    }
-    (out_status, headers, upstream_body).into_response()
+    (
+        out_status,
+        warden_headers(&correlation_id, state.mode, would_deny),
+        upstream_body,
+    )
+        .into_response()
 }
 
 /// Byte-equality in time proportional to `expected.len()`. Used for
