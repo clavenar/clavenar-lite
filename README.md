@@ -82,9 +82,32 @@ Every flag falls back to a `WARDEN_LITE_*` env var:
 | `--token`                  | `WARDEN_LITE_TOKEN`                  | (none — open access)      |
 | `--upstream-api-key`       | `WARDEN_LITE_UPSTREAM_API_KEY`       | (none — pass-through)     |
 | `--upstream-timeout-secs`  | `WARDEN_LITE_UPSTREAM_TIMEOUT_SECS`  | 120                       |
+| `--mode`                   | `WARDEN_LITE_MODE`                   | `enforce`                 |
 
 The upstream URL is parsed at startup and a typo fails fast with exit
 code `1` rather than 502-ing the first request through.
+
+## Rollout: observe before enforce
+
+`--mode observe` flips warden-lite into a pass-through observability
+layer:
+
+- Every request forwards upstream regardless of policy / Brain verdict.
+- The ledger still records `authorized=false` for would-have-denied
+  requests, so the audit trail of what enforce mode *would* have done
+  stays accurate.
+- Every response carries `X-Warden-Mode: observe`. Would-have-denied
+  responses also carry `X-Warden-Would-Deny: true` — count those to
+  size the blast radius of flipping enforce on.
+
+Recommended rollout: deploy in observe for a week, watch the
+`X-Warden-Would-Deny` rate per tool in your dashboards, tune policies
+until the rate is on the floor of "things that genuinely should be
+denied," then flip `WARDEN_LITE_MODE=enforce` and pop the gate.
+
+```bash
+warden-lite start --mode observe --upstream https://api.openai.com/v1
+```
 
 ## Wire format
 
