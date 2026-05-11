@@ -937,3 +937,121 @@ async fn decide_token_required_when_configured() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
 }
+
+#[tokio::test]
+async fn list_pendings_returns_parked_rows_newest_first() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
+
+    let corr1 = park_wire_transfer(lite_addr).await;
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    let corr2 = park_wire_transfer(lite_addr).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}/pending", lite_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let rows: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["correlation_id"], corr2);
+    assert_eq!(rows[1]["correlation_id"], corr1);
+    assert!(rows[0]["decision"].is_null());
+}
+
+#[tokio::test]
+async fn list_pendings_filter_excludes_decided() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
+
+    let corr_parked = park_wire_transfer(lite_addr).await;
+    let corr_decided = park_wire_transfer(lite_addr).await;
+    let ok = reqwest::Client::new()
+        .post(format!(
+            "http://{}/pending/{}/decide",
+            lite_addr, corr_decided
+        ))
+        .json(&serde_json::json!({ "decision": "allow" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status().as_u16(), 200);
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}/pending", lite_addr))
+        .send()
+        .await
+        .unwrap();
+    let rows: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["correlation_id"], corr_parked);
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}/pending?status=decided", lite_addr))
+        .send()
+        .await
+        .unwrap();
+    let rows: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["correlation_id"], corr_decided);
+    assert_eq!(rows[0]["decision"], "allow");
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}/pending?status=all", lite_addr))
+        .send()
+        .await
+        .unwrap();
+    let rows: Vec<serde_json::Value> = resp.json().await.unwrap();
+    assert_eq!(rows.len(), 2);
+}
+
+#[tokio::test]
+async fn list_pendings_bad_status_returns_400() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}/pending?status=garbage", lite_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn list_pendings_requires_decide_token_when_configured() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) = spawn_lite_with_decide_token(
+        format!("http://{}/mcp", upstream),
+        "op-secret".to_string(),
+    )
+    .await;
+
+    let unauth = reqwest::Client::new()
+        .get(format!("http://{}/pending", lite_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth.status().as_u16(), 401);
+
+    let ok = reqwest::Client::new()
+        .get(format!("http://{}/pending", lite_addr))
+        .header("Authorization", "Bearer op-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status().as_u16(), 200);
+}
+
+#[tokio::test]
+async fn list_pendings_caps_limit_at_500() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}/pending?limit=9999", lite_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+}

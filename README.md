@@ -142,11 +142,20 @@ For real traffic, layer these on top of the default deploy:
 
 ```
 warden-lite start [--port N] [--upstream URL] [--policies DIR] [--ledger PATH]
-                  [--velocity-window SECS] [--token TOKEN]
+                  [--velocity-window SECS] [--token TOKEN] [--decide-token TOKEN]
                   [--upstream-api-key KEY] [--upstream-timeout-secs SECS]
 warden-lite verify [--ledger PATH]
 warden-lite audit  [--ledger PATH] <agent_id>
+warden-lite pending list   [--endpoint URL] [--decide-token TOKEN]
+                            [--status parked|decided|all] [--limit N] [--json]
+warden-lite pending get    <correlation_id> [--endpoint URL] [--token TOKEN] [--json]
+warden-lite pending decide <correlation_id> --allow | --deny [--note STRING]
+                            [--endpoint URL] [--decide-token TOKEN]
 ```
+
+The `pending` subcommands talk to a *running* warden-lite over HTTP —
+the same endpoints your agent posts to. Operators use them to triage
+parked tool calls without curl'ing the API directly.
 
 Every flag falls back to a `WARDEN_LITE_*` env var:
 
@@ -280,13 +289,19 @@ $ curl -sS -X POST http://localhost:8088/mcp \
 # → 202
 # {"status":"pending","correlation_id":"8f1d...","review_reasons":[...]}
 
-# Approve it (operator-side):
-$ curl -sS -X POST http://localhost:8088/pending/8f1d.../decide \
-    -H 'Authorization: Bearer decide-token' \
-    -H 'Content-Type: application/json' \
-    -d '{"decision":"allow","note":"ok by sec"}'
-# → 200 { "decision": "allow", "decided_at": "...", ... }
+# Approve it (operator-side) — either curl, or the built-in CLI:
+$ warden-lite pending list --decide-token op-token
+CORRELATION_ID                         AGENT_ID         TOOL_TYPE        REQUESTED_AT         STATUS
+8f1d...                                bearer-agent     wire_transfer    2026-05-12T10:14:03Z parked
+
+$ warden-lite pending decide 8f1d... --decide-token op-token --allow --note "ok by sec"
+ok: pending 8f1d... decided allow
 ```
+
+The CLI is a thin wrapper over `/pending/*` — partners can use either,
+and the wire format is the source of truth. `--endpoint`,
+`--decide-token`, and `--token` fall back to `WARDEN_LITE_URL`,
+`WARDEN_LITE_DECIDE_TOKEN`, and `WARDEN_LITE_TOKEN` respectively.
 
 Auth tokens are independent: set neither for developer-laptop use,
 set just `--token` to gate the agent surface, set both when there's a

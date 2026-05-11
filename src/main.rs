@@ -118,6 +118,68 @@ enum Command {
         /// The agent_id to audit (matched against the `agent_id` column).
         agent_id: String,
     },
+
+    /// Operator commands for parked tool calls — list, inspect, decide.
+    /// Talks to a running warden-lite over HTTP; not a local-DB
+    /// operation. Use against the same `--endpoint` your agent posts to.
+    Pending {
+        #[command(subcommand)]
+        action: PendingAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PendingAction {
+    /// List parked (or decided, or all) pendings.
+    List {
+        /// Warden-lite base URL. Default `http://localhost:8088`.
+        #[arg(long, env = "WARDEN_LITE_URL", default_value = "http://localhost:8088")]
+        endpoint: String,
+        /// Operator bearer token. Required if warden-lite was booted
+        /// with `--decide-token`. Env `WARDEN_LITE_DECIDE_TOKEN`.
+        #[arg(long, env = "WARDEN_LITE_DECIDE_TOKEN")]
+        decide_token: Option<String>,
+        /// `parked` (default) | `decided` | `all`.
+        #[arg(long, default_value = "parked")]
+        status: String,
+        /// Max rows. Server caps at 500.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        /// Print raw JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Look up one pending by correlation id.
+    Get {
+        /// Correlation id (returned in the 202 body and the
+        /// `X-Warden-Correlation-Id` header).
+        id: String,
+        #[arg(long, env = "WARDEN_LITE_URL", default_value = "http://localhost:8088")]
+        endpoint: String,
+        /// Agent bearer token (poll path). Env `WARDEN_LITE_TOKEN`.
+        #[arg(long, env = "WARDEN_LITE_TOKEN")]
+        token: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Resolve a pending — pick exactly one of `--allow` or `--deny`,
+    /// with an optional free-text `--note` that lands in the audit
+    /// ledger.
+    Decide {
+        id: String,
+        #[arg(long, env = "WARDEN_LITE_URL", default_value = "http://localhost:8088")]
+        endpoint: String,
+        #[arg(long, env = "WARDEN_LITE_DECIDE_TOKEN")]
+        decide_token: Option<String>,
+        #[arg(long, conflicts_with = "deny")]
+        allow: bool,
+        #[arg(long, conflicts_with = "allow")]
+        deny: bool,
+        #[arg(long)]
+        note: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -172,9 +234,224 @@ async fn main() {
             let path = ledger.unwrap_or_else(|| "./warden-lite.db".into());
             run_audit(path, agent_id).await
         }
+        Command::Pending { action } => run_pending(action).await,
     };
 
     std::process::exit(exit_code);
+}
+
+async fn run_pending(action: PendingAction) -> i32 {
+    let client = reqwest::Client::new();
+    match action {
+        PendingAction::List {
+            endpoint,
+            decide_token,
+            status,
+            limit,
+            json,
+        } => run_pending_list(&client, &endpoint, decide_token, &status, limit, json).await,
+        PendingAction::Get {
+            id,
+            endpoint,
+            token,
+            json,
+        } => run_pending_get(&client, &endpoint, &id, token, json).await,
+        PendingAction::Decide {
+            id,
+            endpoint,
+            decide_token,
+            allow,
+            deny,
+            note,
+        } => {
+            let decision = match (allow, deny) {
+                (true, false) => "allow",
+                (false, true) => "deny",
+                _ => {
+                    eprintln!("error: pass exactly one of --allow or --deny");
+                    return 2;
+                }
+            };
+            run_pending_decide(&client, &endpoint, &id, decide_token, decision, note).await
+        }
+    }
+}
+
+async fn run_pending_list(
+    client: &reqwest::Client,
+    endpoint: &str,
+    decide_token: Option<String>,
+    status: &str,
+    limit: u32,
+    json: bool,
+) -> i32 {
+    let url = format!(
+        "{}/pending?status={}&limit={}",
+        endpoint.trim_end_matches('/'),
+        status,
+        limit
+    );
+    let mut req = client.get(&url);
+    if let Some(t) = &decide_token {
+        req = req.bearer_auth(t);
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: failed to reach {}: {}", endpoint, e);
+            return 5;
+        }
+    };
+    let status_code = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    if status_code != 200 {
+        eprintln!("error: list pendings returned {}: {}", status_code, body);
+        return match status_code {
+            400 => 2,
+            401 | 403 => 3,
+            _ => 5,
+        };
+    }
+    if json {
+        println!("{}", body);
+        return 0;
+    }
+    let rows: Vec<serde_json::Value> = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: failed to parse list response: {}", e);
+            return 5;
+        }
+    };
+    if rows.is_empty() {
+        println!("(no pendings matching status={})", status);
+        return 0;
+    }
+    // Strip the nanosecond tail from timestamps for display — we keep
+    // it in the DB for accurate ordering, but the screen-width budget
+    // wants seconds. The full timestamp is still in --json output.
+    fn short_ts(t: &str) -> String {
+        match t.find('.') {
+            Some(i) => format!("{}Z", &t[..i]),
+            None => t.to_string(),
+        }
+    }
+    println!(
+        "{:<38} {:<16} {:<16} {:<20} STATUS",
+        "CORRELATION_ID", "AGENT_ID", "TOOL_TYPE", "REQUESTED_AT"
+    );
+    for r in &rows {
+        let decision = r["decision"].as_str().unwrap_or("parked");
+        let ts = short_ts(r["requested_at"].as_str().unwrap_or(""));
+        println!(
+            "{:<38} {:<16} {:<16} {:<20} {}",
+            r["correlation_id"].as_str().unwrap_or(""),
+            r["agent_id"].as_str().unwrap_or(""),
+            r["tool_type"].as_str().unwrap_or(""),
+            ts,
+            decision
+        );
+    }
+    0
+}
+
+async fn run_pending_get(
+    client: &reqwest::Client,
+    endpoint: &str,
+    id: &str,
+    token: Option<String>,
+    json: bool,
+) -> i32 {
+    let url = format!("{}/pending/{}", endpoint.trim_end_matches('/'), id);
+    let mut req = client.get(&url);
+    if let Some(t) = &token {
+        req = req.bearer_auth(t);
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: failed to reach {}: {}", endpoint, e);
+            return 5;
+        }
+    };
+    let status_code = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    match status_code {
+        200 => {
+            if json {
+                println!("{}", body);
+            } else {
+                println!("{}", body); // pretty-print path not worth the bytes
+            }
+            0
+        }
+        404 => {
+            eprintln!("not found: {}", id);
+            4
+        }
+        401 | 403 => {
+            eprintln!("auth: {}", body);
+            3
+        }
+        _ => {
+            eprintln!("error {}: {}", status_code, body);
+            5
+        }
+    }
+}
+
+async fn run_pending_decide(
+    client: &reqwest::Client,
+    endpoint: &str,
+    id: &str,
+    decide_token: Option<String>,
+    decision: &str,
+    note: Option<String>,
+) -> i32 {
+    let url = format!("{}/pending/{}/decide", endpoint.trim_end_matches('/'), id);
+    let body = match &note {
+        Some(n) => serde_json::json!({ "decision": decision, "note": n }),
+        None => serde_json::json!({ "decision": decision }),
+    };
+    let mut req = client.post(&url).json(&body);
+    if let Some(t) = &decide_token {
+        req = req.bearer_auth(t);
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: failed to reach {}: {}", endpoint, e);
+            return 5;
+        }
+    };
+    let status_code = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    match status_code {
+        200 => {
+            println!("ok: pending {} decided {}", id, decision);
+            0
+        }
+        400 => {
+            eprintln!("bad request: {}", body);
+            2
+        }
+        401 | 403 => {
+            eprintln!("auth: {}", body);
+            3
+        }
+        404 => {
+            eprintln!("not found: {}", id);
+            4
+        }
+        409 => {
+            eprintln!("conflict (already decided): {}", body);
+            4
+        }
+        _ => {
+            eprintln!("error {}: {}", status_code, body);
+            5
+        }
+    }
 }
 
 fn open_ledger(path: &str) -> Result<Ledger, i32> {
