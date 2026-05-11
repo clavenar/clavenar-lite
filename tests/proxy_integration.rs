@@ -63,12 +63,34 @@ async fn spawn_lite(
     upstream_url: String,
     bearer_token: Option<String>,
 ) -> (SocketAddr, Arc<Ledger>) {
-    spawn_lite_with_mode(upstream_url, bearer_token, WardenMode::Enforce).await
+    spawn_lite_full(upstream_url, bearer_token, None, WardenMode::Enforce).await
 }
 
 async fn spawn_lite_with_mode(
     upstream_url: String,
     bearer_token: Option<String>,
+    mode: WardenMode,
+) -> (SocketAddr, Arc<Ledger>) {
+    spawn_lite_full(upstream_url, bearer_token, None, mode).await
+}
+
+async fn spawn_lite_with_decide_token(
+    upstream_url: String,
+    decide_token: String,
+) -> (SocketAddr, Arc<Ledger>) {
+    spawn_lite_full(
+        upstream_url,
+        None,
+        Some(decide_token),
+        WardenMode::Enforce,
+    )
+    .await
+}
+
+async fn spawn_lite_full(
+    upstream_url: String,
+    bearer_token: Option<String>,
+    decide_token: Option<String>,
     mode: WardenMode,
 ) -> (SocketAddr, Arc<Ledger>) {
     let policy = Arc::new(PolicyEngine::from_dir(&policies_dir(), 60).unwrap());
@@ -79,6 +101,7 @@ async fn spawn_lite_with_mode(
         upstream_url,
         http: reqwest::Client::new(),
         bearer_token,
+        decide_token,
         upstream_api_key: None,
         mode,
     });
@@ -91,6 +114,33 @@ async fn spawn_lite_with_mode(
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
     (addr, ledger)
+}
+
+/// Park a yellow-tier `wire_transfer` against the running proxy and
+/// return its correlation id. Helpers for the decide-endpoint tests
+/// below.
+async fn park_wire_transfer(lite_addr: SocketAddr) -> String {
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/mcp", lite_addr))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "call_tool",
+            "params": {
+                "name": "wire_transfer",
+                "arguments": { "to": "acct-1", "amount": 100 }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    resp.headers()
+        .get("x-warden-correlation-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
 }
 
 #[tokio::test]
@@ -609,4 +659,155 @@ async fn empty_method_rejected() {
     // Nothing should be appended to the ledger when we reject pre-pipeline.
     let entries = ledger.entries_for_agent("anonymous").await.unwrap();
     assert!(entries.is_empty(), "rejected request must not write a ledger row");
+}
+
+#[tokio::test]
+async fn decide_allow_flips_pending_and_writes_audit_row() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, ledger) =
+        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let corr = park_wire_transfer(lite_addr).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/pending/{}/decide", lite_addr, corr))
+        .json(&serde_json::json!({ "decision": "allow", "note": "ok by sec" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["decision"], "allow");
+    assert_eq!(body["decider_note"], "ok by sec");
+    assert!(body["decided_at"].is_string());
+
+    // Pending row is now decided.
+    let pending = ledger.get_pending(&corr).await.unwrap().unwrap();
+    assert_eq!(pending.decision.as_deref(), Some("allow"));
+
+    // Second ledger row exists, same correlation id, intent flipped.
+    let entries = ledger.entries_for_agent("anonymous").await.unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].intent_category, "PendingReview");
+    assert!(!entries[0].authorized);
+    assert_eq!(entries[1].intent_category, "PendingApproved");
+    assert!(entries[1].authorized);
+    assert_eq!(entries[1].correlation_id.as_deref(), Some(corr.as_str()));
+    assert!(entries[1].reasoning.contains("ok by sec"));
+}
+
+#[tokio::test]
+async fn decide_deny_writes_pending_denied_audit_row() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, ledger) =
+        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let corr = park_wire_transfer(lite_addr).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/pending/{}/decide", lite_addr, corr))
+        .json(&serde_json::json!({ "decision": "deny" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let entries = ledger.entries_for_agent("anonymous").await.unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[1].intent_category, "PendingDenied");
+    assert!(!entries[1].authorized);
+}
+
+#[tokio::test]
+async fn decide_twice_returns_409() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) =
+        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let corr = park_wire_transfer(lite_addr).await;
+
+    let client = reqwest::Client::new();
+    let first = client
+        .post(format!("http://{}/pending/{}/decide", lite_addr, corr))
+        .json(&serde_json::json!({ "decision": "allow" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status().as_u16(), 200);
+
+    let second = client
+        .post(format!("http://{}/pending/{}/decide", lite_addr, corr))
+        .json(&serde_json::json!({ "decision": "deny" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status().as_u16(), 409);
+}
+
+#[tokio::test]
+async fn decide_unknown_correlation_id_returns_404() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) =
+        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/pending/no-such-thing/decide", lite_addr))
+        .json(&serde_json::json!({ "decision": "allow" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
+#[tokio::test]
+async fn decide_invalid_decision_string_returns_400() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) =
+        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let corr = park_wire_transfer(lite_addr).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/pending/{}/decide", lite_addr, corr))
+        .json(&serde_json::json!({ "decision": "maybe" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn decide_token_required_when_configured() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) = spawn_lite_with_decide_token(
+        format!("http://{}/mcp", upstream),
+        "op-secret".to_string(),
+    )
+    .await;
+    let corr = park_wire_transfer(lite_addr).await;
+
+    // No token → 401.
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/pending/{}/decide", lite_addr, corr))
+        .json(&serde_json::json!({ "decision": "allow" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 401);
+
+    // Wrong token → still 401.
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/pending/{}/decide", lite_addr, corr))
+        .header("Authorization", "Bearer wrong")
+        .json(&serde_json::json!({ "decision": "allow" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 401);
+
+    // Right token → 200.
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/pending/{}/decide", lite_addr, corr))
+        .header("Authorization", "Bearer op-secret")
+        .json(&serde_json::json!({ "decision": "allow" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
 }

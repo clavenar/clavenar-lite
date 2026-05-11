@@ -149,6 +149,41 @@ pub struct ParkRequest {
     pub review_reasons: Vec<String>,
 }
 
+/// Failure modes for `Ledger::decide_pending`. Mapped 1:1 to HTTP
+/// status by the proxy handler (404 / 409 / 400 / 500).
+#[derive(Debug)]
+pub enum DecideError {
+    /// No pending row for that correlation id.
+    NotFound,
+    /// The pending row already has a decision recorded.
+    AlreadyDecided,
+    /// `decision` was neither `"allow"` nor `"deny"`.
+    InvalidDecision(String),
+    /// Underlying storage failure.
+    Sqlite(rusqlite::Error),
+}
+
+impl std::fmt::Display for DecideError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecideError::NotFound => write!(f, "pending not found"),
+            DecideError::AlreadyDecided => write!(f, "pending already decided"),
+            DecideError::InvalidDecision(d) => {
+                write!(f, "invalid decision {:?}: expected \"allow\" or \"deny\"", d)
+            }
+            DecideError::Sqlite(e) => write!(f, "sqlite error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for DecideError {}
+
+impl From<rusqlite::Error> for DecideError {
+    fn from(e: rusqlite::Error) -> Self {
+        DecideError::Sqlite(e)
+    }
+}
+
 pub struct Ledger {
     conn: Arc<Mutex<Connection>>,
 }
@@ -317,6 +352,71 @@ impl Ledger {
             decided_at: None,
             decision: None,
             decider_note: None,
+        })
+    }
+
+    /// Record an operator decision against a pending row. Returns the
+    /// updated record. Idempotent in the failure direction — a second
+    /// call against the same correlation id returns
+    /// {@link DecideError::AlreadyDecided}, never silently overwriting
+    /// a prior decision. The caller is expected to write a follow-up
+    /// {@link LedgerEntry} (intent_category=PendingApproved /
+    /// PendingDenied) so the forensic chain shows both the park and
+    /// the resolve.
+    pub async fn decide_pending(
+        &self,
+        correlation_id: &str,
+        decision: &str,
+        note: Option<&str>,
+    ) -> Result<Pending, DecideError> {
+        if decision != "allow" && decision != "deny" {
+            return Err(DecideError::InvalidDecision(decision.to_string()));
+        }
+        let conn = self.conn.lock().await;
+        // SELECT + UPDATE under the single Mutex<Connection> lock is
+        // serialised, so no race between read-decision-state and
+        // write-decision. The `decided_at IS NULL` guard in the UPDATE
+        // is belt-and-suspenders.
+        let pending = {
+            let mut stmt = conn.prepare(
+                "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
+                        requested_at, decided_at, decision, decider_note
+                 FROM pendings WHERE correlation_id = ?1",
+            )?;
+            let mut rows = stmt.query([correlation_id])?;
+            match rows.next()? {
+                Some(row) => row_to_pending(row)?,
+                None => return Err(DecideError::NotFound),
+            }
+        };
+        if pending.decision.is_some() {
+            return Err(DecideError::AlreadyDecided);
+        }
+
+        let decided_at = Utc::now();
+        let rows_affected = conn.execute(
+            "UPDATE pendings SET decided_at = ?1, decision = ?2, decider_note = ?3
+             WHERE correlation_id = ?4 AND decided_at IS NULL",
+            rusqlite::params![
+                decided_at.to_rfc3339(),
+                decision,
+                note,
+                correlation_id,
+            ],
+        )?;
+        if rows_affected == 0 {
+            // Belt-and-suspenders: under the connection mutex this
+            // should be unreachable, but if it ever fires it means a
+            // concurrent decider got there first — surface as
+            // AlreadyDecided rather than silently no-op'ing.
+            return Err(DecideError::AlreadyDecided);
+        }
+
+        Ok(Pending {
+            decided_at: Some(decided_at),
+            decision: Some(decision.to_string()),
+            decider_note: note.map(str::to_string),
+            ..pending
         })
     }
 
@@ -632,6 +732,81 @@ mod tests {
         let ledger = Ledger::open(":memory:").unwrap();
         let missing = ledger.get_pending("does-not-exist").await.unwrap();
         assert!(missing.is_none());
+    }
+
+    async fn park_sample(ledger: &Ledger, correlation_id: &str) {
+        ledger
+            .park_pending(ParkRequest {
+                correlation_id: correlation_id.to_string(),
+                agent_id: "agent-1".to_string(),
+                tool_type: "wire_transfer".to_string(),
+                method: "call_tool".to_string(),
+                review_reasons: vec!["Review: wire transfers".to_string()],
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn decide_allow_updates_pending_row() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        park_sample(&ledger, "p-1").await;
+        let decided = ledger
+            .decide_pending("p-1", "allow", Some("ok by sec"))
+            .await
+            .unwrap();
+        assert_eq!(decided.decision.as_deref(), Some("allow"));
+        assert!(decided.decided_at.is_some());
+        assert_eq!(decided.decider_note.as_deref(), Some("ok by sec"));
+
+        let refetched = ledger.get_pending("p-1").await.unwrap().unwrap();
+        assert_eq!(refetched.decision.as_deref(), Some("allow"));
+        assert!(refetched.decided_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn decide_deny_records_decision_string() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        park_sample(&ledger, "p-2").await;
+        let decided = ledger.decide_pending("p-2", "deny", None).await.unwrap();
+        assert_eq!(decided.decision.as_deref(), Some("deny"));
+        assert!(decided.decider_note.is_none());
+    }
+
+    #[tokio::test]
+    async fn decide_twice_returns_already_decided() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        park_sample(&ledger, "p-3").await;
+        ledger.decide_pending("p-3", "allow", None).await.unwrap();
+        let err = ledger
+            .decide_pending("p-3", "deny", None)
+            .await
+            .expect_err("second decide must error");
+        assert!(matches!(err, DecideError::AlreadyDecided));
+    }
+
+    #[tokio::test]
+    async fn decide_unknown_correlation_id_returns_not_found() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        let err = ledger
+            .decide_pending("does-not-exist", "allow", None)
+            .await
+            .expect_err("missing pending must error");
+        assert!(matches!(err, DecideError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn decide_rejects_unknown_decision_string() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        park_sample(&ledger, "p-4").await;
+        let err = ledger
+            .decide_pending("p-4", "maybe", None)
+            .await
+            .expect_err("bogus decision must error");
+        match err {
+            DecideError::InvalidDecision(d) => assert_eq!(d, "maybe"),
+            other => panic!("expected InvalidDecision, got {:?}", other),
+        }
     }
 
     #[tokio::test]
