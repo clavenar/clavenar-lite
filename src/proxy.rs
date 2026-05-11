@@ -28,7 +28,7 @@
 
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -39,7 +39,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::heuristics::{self, HeuristicVerdict};
-use crate::ledger::{DecideError, Ledger, LogRequest, ParkRequest, Pending};
+use crate::ledger::{DecideError, Ledger, LogRequest, ParkRequest, Pending, PendingFilter};
 use crate::policy::{AgentHistory, PolicyDecision, PolicyEngine, PolicyInput};
 
 const CORRELATION_HEADER: &str = "X-Warden-Correlation-Id";
@@ -193,6 +193,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(health))
         .route("/mcp", post(handle_mcp))
+        .route("/pending", get(handle_list_pendings))
         .route("/pending/:id", get(handle_get_pending))
         .route("/pending/:id/decide", post(handle_decide_pending))
         .with_state(state)
@@ -241,6 +242,92 @@ impl From<Pending> for PendingView {
             decided_at: p.decided_at.map(|t| t.to_rfc3339()),
             decision: p.decision,
             decider_note: p.decider_note,
+        }
+    }
+}
+
+/// Query string params for `GET /pending`. `status` defaults to
+/// `parked` (operator triage view). `limit` defaults to 50 and is
+/// hard-capped server-side at 500 — a misconfigured client asking for
+/// 1M rows can't exhaust memory.
+#[derive(Debug, Deserialize)]
+struct ListPendingParams {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+const LIST_PENDING_DEFAULT_LIMIT: u32 = 50;
+const LIST_PENDING_MAX_LIMIT: u32 = 500;
+
+async fn handle_list_pendings(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListPendingParams>,
+    headers: HeaderMap,
+) -> Response {
+    // Listing pendings is an operator capability — same token gate as
+    // `decide`. Auth is required if `--decide-token` was set at boot;
+    // otherwise the endpoint is open (single-user developer mode).
+    let corr = Uuid::new_v4().to_string();
+    if let Some(expected) = &state.decide_token {
+        let supplied = headers
+            .get("authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "));
+        let ok = match supplied {
+            Some(s) => constant_time_eq(s.as_bytes(), expected.as_bytes()),
+            None => false,
+        };
+        if !ok {
+            return (
+                StatusCode::UNAUTHORIZED,
+                warden_headers(&corr, state.mode, false, false),
+                "missing or invalid decide token",
+            )
+                .into_response();
+        }
+    }
+
+    let filter = match params.status.as_deref() {
+        None | Some("parked") => PendingFilter::Parked,
+        Some("decided") => PendingFilter::Decided,
+        Some("all") => PendingFilter::All,
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                warden_headers(&corr, state.mode, false, false),
+                format!(
+                    "unknown status filter {:?} (want parked|decided|all)",
+                    other
+                ),
+            )
+                .into_response();
+        }
+    };
+    let limit = params
+        .limit
+        .unwrap_or(LIST_PENDING_DEFAULT_LIMIT)
+        .min(LIST_PENDING_MAX_LIMIT);
+
+    match state.ledger.list_pendings(filter, limit).await {
+        Ok(rows) => {
+            let views: Vec<PendingView> = rows.into_iter().map(PendingView::from).collect();
+            (
+                StatusCode::OK,
+                warden_headers(&corr, state.mode, false, false),
+                Json(views),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("list_pendings sqlite failure: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                warden_headers(&corr, state.mode, false, false),
+                "internal ledger error",
+            )
+                .into_response()
         }
     }
 }
