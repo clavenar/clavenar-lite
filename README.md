@@ -8,42 +8,17 @@ control plane.
 
 [![Deploy on Fly.io](https://fly.io/static/images/launch/deploy.svg)](https://fly.io/launch/?repo=https://github.com/vanteguardlabs/warden-lite)
 
-```bash
-cargo install warden-lite
-warden-lite start --upstream https://api.openai.com/v1 --port 8088
-```
+## Run it in 60 seconds
 
-Now point your agent at `http://localhost:8088/mcp` instead of the
-upstream URL. Every request is inspected before it forwards.
+Pick whichever surface fits how you ship today. All three boot with
+`observe` mode set so the first request through the proxy never 403s
+— flip to `enforce` when you trust the verdicts.
 
-## 60-second deploy
-
-The repo ships a multi-stage `Dockerfile` and a `fly.toml` tuned for
-the free tier — observe mode, shared-cpu-1x, auto-stop. Click the
-button above or:
+**Container** (no Rust toolchain needed):
 
 ```bash
-fly launch --copy-config --image $(docker build -q .)
-fly secrets set WARDEN_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completions
-fly secrets set WARDEN_LITE_TOKEN=<random-bearer>     # optional ingress auth
-fly deploy
-```
-
-That's it. The deployed proxy starts in observe mode (every request
-forwards, ledger records what *would* have been denied). Once you've
-watched the `X-Warden-Would-Deny` rate settle, flip the mode:
-
-```bash
-fly secrets set WARDEN_LITE_MODE=enforce
-fly deploy --restart-only
-```
-
-See **Promoting to production** below for the ledger-persistence and
-upstream-credential-injection knobs.
-
-## Container
-
-```bash
+git clone https://github.com/vanteguardlabs/warden-lite
+cd warden-lite
 docker build -t warden-lite .
 docker run -p 8088:8088 \
   -e WARDEN_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completions \
@@ -51,20 +26,93 @@ docker run -p 8088:8088 \
   warden-lite
 ```
 
-The image:
+**Fly.io** (deploy button above, or):
 
-- Runs as nonroot UID 65532.
-- Bundles the default `governance.rego` at
-  `/etc/warden-lite/policies`. Override with a bind-mount and
-  `WARDEN_LITE_POLICY_DIR`.
-- Defaults the ledger to `:memory:`. Set
-  `WARDEN_LITE_LEDGER=/var/lib/warden-lite/ledger.db` and bind-mount
-  a volume to persist the audit chain across restarts.
-- Honours every `WARDEN_LITE_*` env in the table below.
+```bash
+fly launch --copy-config
+fly secrets set WARDEN_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completions
+fly deploy
+```
 
-### Promoting to production
+**Local** (Rust toolchain installed):
 
-For real traffic, layer these in on top of the default deploy:
+```bash
+cargo install warden-lite
+warden-lite start --mode observe \
+  --upstream https://api.openai.com/v1/chat/completions
+```
+
+Hit it once to confirm:
+
+```bash
+curl -i http://localhost:8088/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"call_tool",
+       "params":{"name":"search","arguments":{"q":"hello"}}}'
+```
+
+Every response carries `X-Warden-Mode`, `X-Warden-Correlation-Id`,
+and (in observe, on would-have-denied requests) `X-Warden-Would-Deny:
+true`. The correlation id round-trips into the audit ledger so you
+can look the call up later:
+
+```bash
+warden-lite audit anonymous
+warden-lite verify
+```
+
+## Try it with your agent
+
+The companion TypeScript SDK,
+[`@vanteguardlabs/warden-ai-sdk`](https://www.npmjs.com/package/@vanteguardlabs/warden-ai-sdk),
+wraps your Anthropic / OpenAI client so every `tool_use` is
+inspected before your tool-execution loop sees it. Point it at the
+local proxy:
+
+```ts
+import Anthropic from '@anthropic-ai/sdk';
+import { wardenWrap, WardenDenied } from '@vanteguardlabs/warden-ai-sdk';
+
+const client = wardenWrap(new Anthropic(), {
+  endpoint: 'http://localhost:8088',   // the warden-lite you just booted
+  mode: 'enforce',                     // throw on deny; 'observe' to passthrough
+});
+
+try {
+  const msg = await client.messages.create({
+    model: 'claude-opus-4-7', max_tokens: 1024,
+    tools: [/* your tool schemas */],
+    messages: [{ role: 'user', content: 'delete the alice user' }],
+  });
+} catch (e) {
+  if (e instanceof WardenDenied) {
+    console.warn('blocked', e.toolName, e.reasons, e.correlationId);
+  }
+}
+```
+
+OpenAI works the same way — pass `new OpenAI()` instead, the SDK
+auto-detects the client shape. See the
+[SDK README](https://github.com/vanteguardlabs/warden-ai-sdk) for
+streaming, observe mode, retry, and verdict-callback options.
+
+## What's in the box
+
+| Layer                | What it does                                                              | Lite ships                                                     |
+|----------------------|---------------------------------------------------------------------------|----------------------------------------------------------------|
+| **Heuristic Brain**  | Scan payload for prompt injection / jailbreak / dangerous-tool signatures | Pure-Rust regex/substring matcher; ~14 needles                 |
+| **Policy Engine**    | Evaluate Rego rules over `tool_type`, `intent_score`, time-of-day, velocity | `regorus` (pure-Rust Rego), in-process velocity tracker        |
+| **Ledger**           | Append-only forensic store with SHA-256 hash chain                        | SQLite (bundled), `verify` and `audit` CLI subcommands         |
+| **Proxy**            | HTTP ingress, security-first orchestration, upstream credential injection | axum + reqwest, optional bearer-token auth                     |
+
+The chain format and policy input shape are byte-compatible with the
+full Agent Warden edition. A chain produced by `warden-lite` verifies
+under the production ledger; a `governance.rego` written for the full
+edition runs verbatim under Lite.
+
+## Promoting to production
+
+For real traffic, layer these on top of the default deploy:
 
 - **Persistent ledger.** Mount a volume at `/var/lib/warden-lite` and
   set `WARDEN_LITE_LEDGER=/var/lib/warden-lite/ledger.db`. The hash
@@ -81,52 +129,6 @@ For real traffic, layer these in on top of the default deploy:
   as the full edition's Vault injection, minus Vault.
 - **Enforce mode.** Flip `WARDEN_LITE_MODE=enforce` once the observe
   data is clean.
-
-## What's in the box
-
-| Layer                | What it does                                                              | Lite ships                                                     |
-|----------------------|---------------------------------------------------------------------------|----------------------------------------------------------------|
-| **Heuristic Brain**  | Scan payload for prompt injection / jailbreak / dangerous-tool signatures | Pure-Rust regex/substring matcher; ~14 needles                 |
-| **Policy Engine**    | Evaluate Rego rules over `tool_type`, `intent_score`, time-of-day, velocity | `regorus` (pure-Rust Rego), in-process velocity tracker        |
-| **Ledger**           | Append-only forensic store with SHA-256 hash chain                        | SQLite (bundled), `verify` and `audit` CLI subcommands         |
-| **Proxy**            | HTTP ingress, security-first orchestration, upstream credential injection | axum + reqwest, optional bearer-token auth                     |
-
-The chain format and policy input shape are byte-compatible with the
-full Agent Warden edition. A chain produced by `warden-lite` verifies
-under the production ledger; a `governance.rego` written for the full
-edition runs verbatim under Lite.
-
-## Quick start
-
-### 1. Install
-
-```bash
-cargo install warden-lite
-```
-
-### 2. Run
-
-```bash
-# Minimal: forward every request to a local stub upstream.
-warden-lite start --upstream http://localhost:9000/mcp
-
-# Realistic: wrap OpenAI. Agent never sees the API key.
-WARDEN_LITE_UPSTREAM_API_KEY=sk-... \
-  warden-lite start \
-  --upstream https://api.openai.com/v1/chat/completions \
-  --port 8088
-```
-
-### 3. Audit
-
-```bash
-warden-lite verify
-# ledger ./warden-lite.db verified — 47 entries OK
-
-warden-lite audit anonymous
-# [2026-05-02T14:23:01Z] seq=12 method=call_tool intent=PromptInjection
-#   authorized=false reasoning=brain[PromptInjection]: Heuristic injection match: ...
-```
 
 ## Subcommands
 
