@@ -39,7 +39,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::heuristics::{self, HeuristicVerdict};
-use crate::ledger::{Ledger, LogRequest};
+use crate::ledger::{Ledger, LogRequest, ParkRequest};
 use crate::policy::{AgentHistory, PolicyDecision, PolicyEngine, PolicyInput};
 
 const CORRELATION_HEADER: &str = "X-Warden-Correlation-Id";
@@ -48,11 +48,14 @@ const CORRELATION_HEADER: &str = "X-Warden-Correlation-Id";
 /// `correlation_id` is included unconditionally — even auth-fail and
 /// parse-error responses get one, so partners can trace rejected
 /// attempts through the access log. `mode` is the current
-/// {@link WardenMode}; `would_deny` only matters in observe.
+/// {@link WardenMode}; `would_deny` / `would_pend` only matter in
+/// observe (in enforce mode the pipeline already short-circuited with
+/// a 403 or 202 before this header would have meaning).
 fn warden_headers(
     correlation_id: &str,
     mode: WardenMode,
     would_deny: bool,
+    would_pend: bool,
 ) -> HeaderMap {
     let mut h = HeaderMap::new();
     h.insert(
@@ -66,6 +69,12 @@ fn warden_headers(
     if would_deny {
         h.insert(
             "X-Warden-Would-Deny",
+            "true".parse().expect("static ascii"),
+        );
+    }
+    if would_pend {
+        h.insert(
+            "X-Warden-Would-Pend",
             "true".parse().expect("static ascii"),
         );
     }
@@ -138,6 +147,41 @@ struct DenyResponse {
     intent_category: String,
 }
 
+/// Response we emit on a yellow-tier park (202 Accepted). The SDK
+/// constructs the poll/decide URLs from its endpoint config and the
+/// `correlation_id`; we deliberately return relative-only state here
+/// to avoid the external-URL ambiguity (Caddy/LB rewrites, custom
+/// paths).
+#[derive(Debug, Serialize)]
+struct PendingResponse {
+    status: &'static str,
+    correlation_id: String,
+    review_reasons: Vec<String>,
+}
+
+/// Three-way outcome of running brain + policy on one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tier {
+    /// Brain green + policy.allow + no review_reasons → forward.
+    Green,
+    /// `policy.allow && !review_reasons.is_empty()` — the pipeline
+    /// wants a human to look before it forwards. Parked in `pendings`
+    /// and returned as 202 in enforce mode.
+    Yellow,
+    /// Brain red or `!policy.allow` — hard deny (403 in enforce).
+    Red,
+}
+
+fn classify(brain: &HeuristicVerdict, policy: &PolicyDecision) -> Tier {
+    if !brain.authorized || !policy.allow {
+        Tier::Red
+    } else if !policy.review_reasons.is_empty() {
+        Tier::Yellow
+    } else {
+        Tier::Green
+    }
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(health))
@@ -180,7 +224,7 @@ async fn handle_mcp(
         if !ok {
             return (
                 StatusCode::UNAUTHORIZED,
-                warden_headers(&correlation_id, state.mode, false),
+                warden_headers(&correlation_id, state.mode, false, false),
                 "missing or invalid bearer token",
             )
                 .into_response();
@@ -195,7 +239,7 @@ async fn handle_mcp(
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                warden_headers(&correlation_id, state.mode, false),
+                warden_headers(&correlation_id, state.mode, false, false),
                 format!("invalid JSON-RPC body: {}", e),
             )
                 .into_response();
@@ -207,7 +251,7 @@ async fn handle_mcp(
     if parsed.method.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            warden_headers(&correlation_id, state.mode, false),
+            warden_headers(&correlation_id, state.mode, false, false),
             "method must be a non-empty string",
         )
             .into_response();
@@ -254,30 +298,29 @@ async fn handle_mcp(
     };
     let policy: PolicyDecision = state.policy.evaluate(policy_input).await;
 
-    let allowed = brain.authorized && policy.allow && policy.review_reasons.is_empty();
+    let tier = classify(&brain, &policy);
 
     // -------- Ledger emission (always) --------
-    // One entry per request, regardless of outcome. The full edition
-    // emits two (proxy + policy NATS rows); Lite collapses to one
-    // because the proxy and policy are the same process.
+    // One entry per request at this orchestration step, regardless of
+    // outcome. Yellow-tier parks get a second entry when the operator
+    // decides (see Tue's decide endpoint). The full edition emits two
+    // (proxy + policy NATS rows); Lite collapses to one because the
+    // proxy and policy are the same process.
     let combined_reasoning = build_reasoning(&brain, &policy);
-    let log_intent = if allowed {
-        brain.intent_category.clone()
-    } else if !policy.review_reasons.is_empty() {
-        "ReviewSoftDeny".to_string()
-    } else if brain.injection_detected {
-        "PromptInjection".to_string()
-    } else if !policy.allow {
-        "PolicyDeny".to_string()
-    } else {
-        "BrainDeny".to_string()
+    let log_intent = match tier {
+        Tier::Green => brain.intent_category.clone(),
+        Tier::Yellow => "PendingReview".to_string(),
+        Tier::Red if brain.injection_detected => "PromptInjection".to_string(),
+        Tier::Red if !policy.allow => "PolicyDeny".to_string(),
+        Tier::Red => "BrainDeny".to_string(),
     };
+    let log_authorized = matches!(tier, Tier::Green);
 
     let log_req = LogRequest {
         agent_id: agent_id.clone(),
         method: parsed.method.clone(),
         intent_category: log_intent,
-        authorized: allowed,
+        authorized: log_authorized,
         reasoning: combined_reasoning.clone(),
         policy_decision: serde_json::to_value(&policy).ok(),
         correlation_id: Some(correlation_id.clone()),
@@ -286,8 +329,48 @@ async fn handle_mcp(
         tracing::warn!("ledger append failed: {}", e);
     }
 
-    let would_deny = !allowed;
-    if !allowed && state.mode == WardenMode::Enforce {
+    let would_deny = matches!(tier, Tier::Red);
+    let would_pend = matches!(tier, Tier::Yellow);
+
+    // -------- Yellow tier: park + 202 (enforce) or forward + flag (observe) --------
+    if would_pend && state.mode == WardenMode::Enforce {
+        // Park the request for human review. The operator (Tue's
+        // decide endpoint) flips this row; SDK polls (Wed's GET
+        // endpoint) to learn the outcome.
+        let park = ParkRequest {
+            correlation_id: correlation_id.clone(),
+            agent_id: agent_id.clone(),
+            tool_type: tool_type.clone(),
+            method: parsed.method.clone(),
+            review_reasons: policy.review_reasons.clone(),
+        };
+        if let Err(e) = state.ledger.park_pending(park).await {
+            // Park failed (most likely a duplicate correlation_id —
+            // shouldn't happen with Uuid::new_v4 but be defensive).
+            // Surface it as a 500 rather than silently 202'ing without
+            // backing state.
+            tracing::error!("park_pending failed: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                warden_headers(&correlation_id, state.mode, false, false),
+                "failed to park pending request",
+            )
+                .into_response();
+        }
+        let resp = PendingResponse {
+            status: "pending",
+            correlation_id: correlation_id.clone(),
+            review_reasons: policy.review_reasons.clone(),
+        };
+        return (
+            StatusCode::ACCEPTED,
+            warden_headers(&correlation_id, state.mode, false, false),
+            Json(resp),
+        )
+            .into_response();
+    }
+
+    if would_deny && state.mode == WardenMode::Enforce {
         // Combine policy + brain reasons so the agent-side caller sees
         // the full audit string in one place. `review_reasons` is kept
         // separate in the JSON so callers that key on it (e.g., a
@@ -304,15 +387,15 @@ async fn handle_mcp(
         };
         return (
             StatusCode::FORBIDDEN,
-            warden_headers(&correlation_id, state.mode, false),
+            warden_headers(&correlation_id, state.mode, false, false),
             Json(resp),
         )
             .into_response();
     }
     // Observe mode falls through to the upstream forward even when
-    // the pipeline would have denied — the partner still gets a real
-    // response, and X-Warden-Would-Deny below tells them what enforce
-    // mode would have done.
+    // the pipeline would have denied or parked — the partner still
+    // gets a real response, and X-Warden-Would-Deny / X-Warden-Would-Pend
+    // below tell them what enforce mode would have done.
 
     // -------- Forward upstream --------
     let mut req_builder = state
@@ -329,7 +412,7 @@ async fn handle_mcp(
         Err(e) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                warden_headers(&correlation_id, state.mode, would_deny),
+                warden_headers(&correlation_id, state.mode, would_deny, would_pend),
                 format!("upstream unreachable: {}", e),
             )
                 .into_response();
@@ -342,7 +425,7 @@ async fn handle_mcp(
         Err(e) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                warden_headers(&correlation_id, state.mode, would_deny),
+                warden_headers(&correlation_id, state.mode, would_deny, would_pend),
                 format!("upstream body read error: {}", e),
             )
                 .into_response();
@@ -356,7 +439,7 @@ async fn handle_mcp(
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (
         out_status,
-        warden_headers(&correlation_id, state.mode, would_deny),
+        warden_headers(&correlation_id, state.mode, would_deny, would_pend),
         upstream_body,
     )
         .into_response()

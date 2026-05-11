@@ -330,9 +330,10 @@ mod tests {
                 correlation_id: None,
             })
             .await;
-        // In Lite, review-tier matches mean allow=false (because the
-        // governance.rego `allow` block requires `count(review) == 0`).
-        assert!(!dec.allow);
+        // Yellow tier: `allow == true` with `review_reasons` non-empty.
+        // The proxy classifies that combination as a park (202), not a
+        // deny (403). See `Tier` in src/proxy.rs.
+        assert!(dec.allow);
         assert!(!dec.review_reasons.is_empty());
         assert!(dec.review_reasons[0].contains("Wire transfer"));
     }

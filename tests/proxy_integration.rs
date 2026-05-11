@@ -370,12 +370,15 @@ async fn sql_execute_policy_blocked() {
 }
 
 #[tokio::test]
-async fn wire_transfer_soft_denied_in_lite() {
-    // In the full edition, this routes to warden-hil. In Lite we
-    // surface the review-tier reason in the response and return 403
-    // — there's no human in the loop.
+async fn wire_transfer_parks_for_review_with_202() {
+    // Yellow tier: policy.allow=true but `review` non-empty. Lite
+    // parks the request in `pendings`, returns 202 with the
+    // correlation id, and writes a ledger row with
+    // intent_category=PendingReview, authorized=false. The full
+    // edition routes this same condition to warden-hil; the
+    // SDK-visible shape is identical.
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, _ledger) =
+    let (lite_addr, ledger) =
         spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
@@ -393,11 +396,96 @@ async fn wire_transfer_soft_denied_in_lite() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status().as_u16(), 403);
+    assert_eq!(resp.status().as_u16(), 202);
+    let header_id = resp
+        .headers()
+        .get("x-warden-correlation-id")
+        .expect("202 must carry a correlation id")
+        .to_str()
+        .unwrap()
+        .to_string();
+
     let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "pending");
+    assert_eq!(body["correlation_id"], serde_json::Value::String(header_id.clone()));
     let reviews = body["review_reasons"].as_array().unwrap();
     assert!(!reviews.is_empty());
     assert!(reviews[0].as_str().unwrap().contains("Wire transfers"));
+
+    // Pending row stored under the correlation id.
+    let pending = ledger
+        .get_pending(&header_id)
+        .await
+        .unwrap()
+        .expect("yellow tier must park a pending row");
+    assert_eq!(pending.tool_type, "wire_transfer");
+    assert!(pending.decision.is_none());
+    assert!(pending.decided_at.is_none());
+
+    // Ledger entry reflects the park.
+    let entries = ledger.entries_for_agent("anonymous").await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(!entries[0].authorized);
+    assert_eq!(entries[0].intent_category, "PendingReview");
+    assert_eq!(entries[0].correlation_id.as_deref(), Some(header_id.as_str()));
+}
+
+#[tokio::test]
+async fn observe_mode_yellow_tier_forwards_with_would_pend_header() {
+    // Same wire_transfer payload, observe mode: response is the
+    // upstream's 200, no row in pendings (no one will approve in
+    // observe), but X-Warden-Would-Pend=true lets the partner count
+    // would-have-parked requests during rollout. Ledger still records
+    // intent=PendingReview, authorized=false.
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, ledger) = spawn_lite_with_mode(
+        format!("http://{}/mcp", upstream),
+        None,
+        WardenMode::Observe,
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/mcp", lite_addr))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "call_tool",
+            "params": {
+                "name": "wire_transfer",
+                "arguments": { "to": "acct-1", "amount": 100 }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("x-warden-would-pend")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "true"
+    );
+    assert!(resp.headers().get("x-warden-would-deny").is_none());
+
+    let header_id = resp
+        .headers()
+        .get("x-warden-correlation-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    // Observe mode does not write to the pendings table — there's no
+    // operator workflow attached to it.
+    assert!(ledger.get_pending(&header_id).await.unwrap().is_none());
+
+    let entries = ledger.entries_for_agent("anonymous").await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(!entries[0].authorized);
+    assert_eq!(entries[0].intent_category, "PendingReview");
 }
 
 #[tokio::test]

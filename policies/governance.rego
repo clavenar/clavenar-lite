@@ -1,14 +1,18 @@
 # Warden Lite — default authorization policy.
 #
 # Loaded by warden-lite at startup. The Rust evaluator queries
-# `data.warden.authz.allow` (bool) and `data.warden.authz.deny` (set[string]).
-# `data.warden.authz.review` is also queried but in Lite there is no HIL
-# orchestrator — review-tier matches are reported in the response and
-# treated as a soft-deny (returned as 403 with a "Review" prefix). The
-# reason strings here are part of the audit surface — keep them stable.
+# `data.warden.authz.allow` (bool), `data.warden.authz.deny`
+# (set[string]), and `data.warden.authz.review` (set[string]). The
+# combination decides the tier:
 #
-# This file is intentionally identical-in-shape to the full edition's
-# policies/governance.rego so users can copy custom rules between them.
+#   deny non-empty               → red (403 in enforce mode)
+#   allow=true + review non-empty → yellow (202, parked for human review)
+#   allow=true + review empty    → green (forward upstream)
+#
+# Reason strings are part of the audit surface — keep them stable.
+#
+# Identical-in-shape to the full edition's policies/governance.rego so
+# rules copy between editions.
 
 package warden.authz
 
@@ -62,12 +66,11 @@ deny contains msg if {
 	)
 }
 
-# --- Yellow tier (in Lite: soft-deny) ---
-# In the full edition these route to the warden-hil orchestrator for human
-# approval. Lite has no HIL — review-tier matches are surfaced to the
-# operator (logged + returned in the deny reason) and the request is
-# rejected. If you need actual human-in-the-loop flows, ship to the full
-# Agent Warden edition.
+# --- Yellow tier (parked for human review) ---
+# As of warden-lite 0.3 these route to the embedded HIL store: a 202
+# response carrying the correlation id, awaiting an operator decision
+# via POST /pending/:id/decide. The full edition routes to warden-hil
+# for the same flow.
 review contains msg if {
 	input.tool_type == "wire_transfer"
 	msg := "Review: Wire transfers require human approval before execution."
@@ -97,8 +100,9 @@ is_business_hours if {
 	weekday_now != "Sunday"
 }
 
-# allow iff no deny rule AND no review rule fired.
+# allow iff no deny rule fired. A non-empty `review` set still
+# yields `allow := true` — the proxy classifies that combination as
+# yellow (parked) rather than red (denied).
 allow if {
 	count(deny) == 0
-	count(review) == 0
 }
