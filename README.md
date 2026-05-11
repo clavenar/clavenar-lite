@@ -6,6 +6,8 @@ calls — inspecting every request, evaluating policy, and writing a
 hash-chained forensic ledger — without standing up a multi-service
 control plane.
 
+[![Deploy on Fly.io](https://fly.io/static/images/launch/deploy.svg)](https://fly.io/launch/?repo=https://github.com/vanteguardlabs/warden-lite)
+
 ```bash
 cargo install warden-lite
 warden-lite start --upstream https://api.openai.com/v1 --port 8088
@@ -13,6 +15,72 @@ warden-lite start --upstream https://api.openai.com/v1 --port 8088
 
 Now point your agent at `http://localhost:8088/mcp` instead of the
 upstream URL. Every request is inspected before it forwards.
+
+## 60-second deploy
+
+The repo ships a multi-stage `Dockerfile` and a `fly.toml` tuned for
+the free tier — observe mode, shared-cpu-1x, auto-stop. Click the
+button above or:
+
+```bash
+fly launch --copy-config --image $(docker build -q .)
+fly secrets set WARDEN_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completions
+fly secrets set WARDEN_LITE_TOKEN=<random-bearer>     # optional ingress auth
+fly deploy
+```
+
+That's it. The deployed proxy starts in observe mode (every request
+forwards, ledger records what *would* have been denied). Once you've
+watched the `X-Warden-Would-Deny` rate settle, flip the mode:
+
+```bash
+fly secrets set WARDEN_LITE_MODE=enforce
+fly deploy --restart-only
+```
+
+See **Promoting to production** below for the ledger-persistence and
+upstream-credential-injection knobs.
+
+## Container
+
+```bash
+docker build -t warden-lite .
+docker run -p 8088:8088 \
+  -e WARDEN_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completions \
+  -e WARDEN_LITE_MODE=observe \
+  warden-lite
+```
+
+The image:
+
+- Runs as nonroot UID 65532.
+- Bundles the default `governance.rego` at
+  `/etc/warden-lite/policies`. Override with a bind-mount and
+  `WARDEN_LITE_POLICY_DIR`.
+- Defaults the ledger to `:memory:`. Set
+  `WARDEN_LITE_LEDGER=/var/lib/warden-lite/ledger.db` and bind-mount
+  a volume to persist the audit chain across restarts.
+- Honours every `WARDEN_LITE_*` env in the table below.
+
+### Promoting to production
+
+For real traffic, layer these in on top of the default deploy:
+
+- **Persistent ledger.** Mount a volume at `/var/lib/warden-lite` and
+  set `WARDEN_LITE_LEDGER=/var/lib/warden-lite/ledger.db`. The hash
+  chain survives restarts; `warden-lite verify` keeps validating.
+- **Custom policies.** Bind-mount your own Rego directory at
+  `/etc/warden-lite/policies` (or any path you prefer with
+  `WARDEN_LITE_POLICY_DIR`). The bundled `governance.rego` is a
+  starting baseline, not a finished policy.
+- **Ingress auth.** Set `WARDEN_LITE_TOKEN`; partners then send
+  `Authorization: Bearer <token>` and unauthenticated requests get
+  401. Without it the proxy accepts every connection.
+- **Upstream creds.** `WARDEN_LITE_UPSTREAM_API_KEY` injects the key
+  into forwarded requests so your agent never sees it. Same shape
+  as the full edition's Vault injection, minus Vault.
+- **Enforce mode.** Flip `WARDEN_LITE_MODE=enforce` once the observe
+  data is clean.
 
 ## What's in the box
 
