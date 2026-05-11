@@ -12,10 +12,10 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::{routing::post, Router};
+use axum::{extract::State, routing::post, Router};
 use warden_lite::ledger::Ledger;
 use warden_lite::policy::PolicyEngine;
 use warden_lite::proxy::{build_router, AppState, WardenMode};
@@ -93,6 +93,16 @@ async fn spawn_lite_full(
     decide_token: Option<String>,
     mode: WardenMode,
 ) -> (SocketAddr, Arc<Ledger>) {
+    spawn_lite_with_slack(upstream_url, bearer_token, decide_token, mode, None).await
+}
+
+async fn spawn_lite_with_slack(
+    upstream_url: String,
+    bearer_token: Option<String>,
+    decide_token: Option<String>,
+    mode: WardenMode,
+    slack_webhook_url: Option<String>,
+) -> (SocketAddr, Arc<Ledger>) {
     let policy = Arc::new(PolicyEngine::from_dir(&policies_dir(), 60).unwrap());
     let ledger = Arc::new(Ledger::open(":memory:").unwrap());
     let state = Arc::new(AppState {
@@ -104,6 +114,7 @@ async fn spawn_lite_full(
         decide_token,
         upstream_api_key: None,
         mode,
+        slack_webhook_url,
     });
     let app = build_router(state);
 
@@ -1054,4 +1065,113 @@ async fn list_pendings_caps_limit_at_500() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
+}
+
+/// Stand up a stub Slack-incoming-webhook that records every received
+/// POST body into the returned `Vec<String>`. Mirrors the upstream
+/// stub shape so tests can spin both up in parallel.
+async fn spawn_stub_slack() -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+    let captured_for_route = captured.clone();
+    let app = Router::new()
+        .route(
+            "/webhook",
+            post(
+                |State(state): State<Arc<Mutex<Vec<String>>>>, body: axum::body::Bytes| async move {
+                    state.lock().unwrap().push(String::from_utf8_lossy(&body).to_string());
+                    "ok"
+                },
+            ),
+        )
+        .with_state(captured_for_route);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (addr, captured)
+}
+
+#[tokio::test]
+async fn slack_webhook_fires_on_yellow_tier_park() {
+    let upstream = spawn_stub_upstream().await;
+    let (slack_addr, captured) = spawn_stub_slack().await;
+    let (lite_addr, _ledger) = spawn_lite_with_slack(
+        format!("http://{}/mcp", upstream),
+        None,
+        None,
+        WardenMode::Enforce,
+        Some(format!("http://{}/webhook", slack_addr)),
+    )
+    .await;
+
+    let corr = park_wire_transfer(lite_addr).await;
+
+    // The Slack POST is fire-and-forget; give the spawned task a
+    // generous slice to land. 200ms is well past the localhost RTT.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let posts = captured.lock().unwrap().clone();
+    assert_eq!(posts.len(), 1, "exactly one slack post expected per park");
+    let body: serde_json::Value = serde_json::from_str(&posts[0]).unwrap();
+    let text = body["text"].as_str().unwrap();
+    assert!(text.contains(&corr));
+    assert!(text.contains("wire_transfer"));
+    assert!(text.contains("warden-lite pending decide"));
+}
+
+#[tokio::test]
+async fn slack_webhook_off_when_not_configured() {
+    let upstream = spawn_stub_upstream().await;
+    let (slack_addr, captured) = spawn_stub_slack().await;
+    // Note: webhook is reachable but warden-lite is configured with None.
+    let (lite_addr, _ledger) = spawn_lite_with_slack(
+        format!("http://{}/mcp", upstream),
+        None,
+        None,
+        WardenMode::Enforce,
+        None,
+    )
+    .await;
+    let _corr = park_wire_transfer(lite_addr).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(captured.lock().unwrap().is_empty());
+    // Touch slack_addr so the unused-var lint doesn't fire and the
+    // listener actually gets evaluated.
+    let _ = slack_addr;
+}
+
+#[tokio::test]
+async fn slack_webhook_failure_does_not_break_park() {
+    // Point at a port nothing is listening on. The spawn must not
+    // panic; the agent's 202 must still come back cleanly.
+    let upstream = spawn_stub_upstream().await;
+    let bad_webhook = "http://127.0.0.1:1".to_string(); // port 1 is reliably unbound
+    let (lite_addr, _ledger) = spawn_lite_with_slack(
+        format!("http://{}/mcp", upstream),
+        None,
+        None,
+        WardenMode::Enforce,
+        Some(bad_webhook),
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/mcp", lite_addr))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "call_tool",
+            "params": {
+                "name": "wire_transfer",
+                "arguments": { "to": "acct-1", "amount": 100 }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    // Give the failed-spawn time to settle so any panic surfaces here.
+    tokio::time::sleep(Duration::from_millis(120)).await;
 }

@@ -144,6 +144,7 @@ For real traffic, layer these on top of the default deploy:
 warden-lite start [--port N] [--upstream URL] [--policies DIR] [--ledger PATH]
                   [--velocity-window SECS] [--token TOKEN] [--decide-token TOKEN]
                   [--upstream-api-key KEY] [--upstream-timeout-secs SECS]
+                  [--slack-webhook-url URL]
 warden-lite verify [--ledger PATH]
 warden-lite audit  [--ledger PATH] <agent_id>
 warden-lite pending list   [--endpoint URL] [--decide-token TOKEN]
@@ -170,6 +171,8 @@ Every flag falls back to a `WARDEN_LITE_*` env var:
 | `--upstream-api-key`       | `WARDEN_LITE_UPSTREAM_API_KEY`       | (none — pass-through)     |
 | `--upstream-timeout-secs`  | `WARDEN_LITE_UPSTREAM_TIMEOUT_SECS`  | 120                       |
 | `--mode`                   | `WARDEN_LITE_MODE`                   | `enforce`                 |
+| `--decide-token`           | `WARDEN_LITE_DECIDE_TOKEN`           | (none — open access)      |
+| `--slack-webhook-url`      | `WARDEN_LITE_SLACK_WEBHOOK_URL`      | (none — alerts off)       |
 
 The upstream URL is parsed at startup and a typo fails fast with exit
 code `1` rather than 502-ing the first request through.
@@ -306,6 +309,35 @@ and the wire format is the source of truth. `--endpoint`,
 Auth tokens are independent: set neither for developer-laptop use,
 set just `--token` to gate the agent surface, set both when there's a
 real operator workflow.
+
+### Slack alerts (optional)
+
+Pass `--slack-webhook-url https://hooks.slack.com/services/...` (or
+set `WARDEN_LITE_SLACK_WEBHOOK_URL`) to fire a one-way alert into a
+Slack channel each time a tool call lands in the pendings table. The
+message carries the correlation id, agent id, tool, the review reasons
+that fired, and the exact `warden-lite pending decide` invocation an
+operator would run to approve or deny:
+
+```
+:warning: Agent Warden parked a tool call for review
+
+*Tool:* `wire_transfer`
+*Agent:* `bearer-agent`
+*Correlation ID:* `8f1d-…`
+*Reasons:*
+  • Review: Wire transfers require human approval before execution.
+
+Approve: `warden-lite pending decide 8f1d-… --allow`
+Deny:    `warden-lite pending decide 8f1d-… --deny --note "…"`
+```
+
+Fire-and-forget by design: a slow or unreachable Slack never blocks
+the agent's 202 response. The same generic-webhook shape (a JSON
+`{ "text": "..." }` POST) works against Discord and Mattermost too;
+MS Teams needs Adaptive Card markup which Lite does not emit. There is
+no return path from Slack — operators decide via the CLI or curl. The
+clickable-button approval flow lives in the full edition's HIL service.
 
 ## Customising policy
 

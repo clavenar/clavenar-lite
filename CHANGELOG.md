@@ -21,6 +21,14 @@ once Slack webhook + fresh-host smoke test + demo wiring land.
   scripting. `pending decide` takes `--allow` or `--deny` (mutually
   exclusive) + optional `--note`. Falls back to `WARDEN_LITE_URL`,
   `WARDEN_LITE_DECIDE_TOKEN`, `WARDEN_LITE_TOKEN` envs.
+- **Slack-webhook park alerts** via `--slack-webhook-url` (or
+  `WARDEN_LITE_SLACK_WEBHOOK_URL`). Every yellow-tier park spawns a
+  fire-and-forget POST with the correlation id, agent, tool, review
+  reasons, and the exact `warden-lite pending decide` command line
+  for the approver. One-way — operators decide via the CLI or curl
+  (no Slack→warden return path; that lives in the full edition's HIL
+  service). Failed webhooks log at `warn` and never block the
+  agent's 202.
 
 ## [0.3.0] - 2026-05-11
 
