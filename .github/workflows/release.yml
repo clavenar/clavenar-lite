@@ -1,0 +1,86 @@
+name: release
+
+# Push a tag matching v* (e.g. v0.2.0) to publish. The tag must
+# match Cargo.toml's `version`; the workflow asserts this before
+# anything destructive runs.
+#
+# What this ships:
+#   1. Multi-arch container image (linux/amd64 + linux/arm64) at
+#      ghcr.io/vanteguardlabs/warden-lite:{version} + :latest.
+#   2. A GitHub release with the matching CHANGELOG.md section as
+#      the release body.
+#
+# First-time setup: after the first successful release run, flip
+# the GHCR package to public — Settings → Packages → warden-lite →
+# Change visibility → Public. Otherwise the docker run example in
+# the README requires an auth'd pull.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # required for `gh release create`
+  packages: write   # required to push to ghcr.io
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches Cargo.toml version
+        id: ver
+        run: |
+          TAG=${GITHUB_REF_NAME#v}
+          CARGO_VERSION=$(grep -E '^version = ' Cargo.toml | head -1 | sed -E 's/version = "(.*)"/\1/')
+          if [ "$TAG" != "$CARGO_VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME (=$TAG) does not match Cargo.toml ($CARGO_VERSION)"
+            exit 1
+          fi
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/vanteguardlabs/warden-lite:${{ steps.ver.outputs.version }}
+            ghcr.io/vanteguardlabs/warden-lite:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract CHANGELOG section for this version
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          # Pull the lines from "## [VERSION]" up to (not including) the
+          # next "## [" header. If the section is empty, fail the run.
+          awk -v ver="[$VERSION]" \
+              '$0 ~ "^## "ver" -" { flag=1; print; next } /^## \[/ && flag { exit } flag' \
+              CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::no CHANGELOG section found for $VERSION"
+            exit 1
+          fi
+          echo "---release-notes.md---"
+          cat release-notes.md
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "${GITHUB_REF_NAME} — warden-lite" \
+            --notes-file release-notes.md
