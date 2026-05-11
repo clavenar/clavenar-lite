@@ -127,6 +127,11 @@ pub struct AppState {
     pub upstream_api_key: Option<String>,
     /// Enforcement posture (see {@link WardenMode}).
     pub mode: WardenMode,
+    /// Optional Slack-incoming-webhook URL. When set, every yellow-tier
+    /// park spawns a fire-and-forget POST with a formatted alert. No
+    /// return path — operators decide via `warden-lite pending decide`
+    /// or curl.
+    pub slack_webhook_url: Option<String>,
 }
 
 /// Wire shape for the `POST /mcp` request body. We accept any JSON
@@ -690,19 +695,34 @@ async fn handle_mcp(
             method: parsed.method.clone(),
             review_reasons: policy.review_reasons.clone(),
         };
-        if let Err(e) = state.ledger.park_pending(park).await {
-            // Park failed (most likely a duplicate correlation_id —
-            // shouldn't happen with Uuid::new_v4 but be defensive).
-            // Surface it as a 500 rather than silently 202'ing without
-            // backing state.
-            tracing::error!("park_pending failed: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                warden_headers(&correlation_id, state.mode, false, false),
-                "failed to park pending request",
-            )
-                .into_response();
+        let parked = match state.ledger.park_pending(park).await {
+            Ok(p) => p,
+            Err(e) => {
+                // Park failed (most likely a duplicate correlation_id —
+                // shouldn't happen with Uuid::new_v4 but be defensive).
+                // Surface it as a 500 rather than silently 202'ing
+                // without backing state.
+                tracing::error!("park_pending failed: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    warden_headers(&correlation_id, state.mode, false, false),
+                    "failed to park pending request",
+                )
+                    .into_response();
+            }
+        };
+
+        // Fire-and-forget Slack alert if configured. The agent's 202
+        // never waits on Slack — a flaky webhook would otherwise
+        // bottleneck every parked tool call.
+        if let Some(url) = &state.slack_webhook_url {
+            let http = state.http.clone();
+            let url = url.clone();
+            tokio::spawn(async move {
+                crate::slack::notify_pending_parked(&http, &url, &parked).await;
+            });
         }
+
         let resp = PendingResponse {
             status: "pending",
             correlation_id: correlation_id.clone(),
@@ -882,6 +902,7 @@ mod tests {
             decide_token: None,
             upstream_api_key: None,
             mode: WardenMode::Enforce,
+            slack_webhook_url: None,
         });
     }
 }
