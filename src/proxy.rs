@@ -193,6 +193,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(health))
         .route("/mcp", post(handle_mcp))
+        .route("/pending/:id", get(handle_get_pending))
         .route("/pending/:id/decide", post(handle_decide_pending))
         .with_state(state)
 }
@@ -240,6 +241,63 @@ impl From<Pending> for PendingView {
             decided_at: p.decided_at.map(|t| t.to_rfc3339()),
             decision: p.decision,
             decider_note: p.decider_note,
+        }
+    }
+}
+
+async fn handle_get_pending(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let poll_corr = Uuid::new_v4().to_string();
+
+    // Reuse the agent-facing `bearer_token` for poll auth. Polling is
+    // a strictly read-only capability the SDK needs after parking a
+    // tool call, so the same identity that issued the `/mcp` call is
+    // the natural caller. Lite does not scope polls per-correlation-id —
+    // any holder of the bearer can read any correlation id. For
+    // production per-agent isolation, ship to the full edition.
+    if let Some(expected) = &state.bearer_token {
+        let supplied = headers
+            .get("authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "));
+        let ok = match supplied {
+            Some(s) => constant_time_eq(s.as_bytes(), expected.as_bytes()),
+            None => false,
+        };
+        if !ok {
+            return (
+                StatusCode::UNAUTHORIZED,
+                warden_headers(&poll_corr, state.mode, false, false),
+                "missing or invalid bearer token",
+            )
+                .into_response();
+        }
+    }
+
+    match state.ledger.get_pending(&id).await {
+        Ok(Some(p)) => (
+            StatusCode::OK,
+            warden_headers(&poll_corr, state.mode, false, false),
+            Json(PendingView::from(p)),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            warden_headers(&poll_corr, state.mode, false, false),
+            format!("no pending with correlation_id {}", id),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("get_pending sqlite failure: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                warden_headers(&poll_corr, state.mode, false, false),
+                "internal ledger error",
+            )
+                .into_response()
         }
     }
 }
