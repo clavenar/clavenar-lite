@@ -68,6 +68,15 @@ enum Command {
         #[arg(long, env = "WARDEN_LITE_TOKEN")]
         token: Option<String>,
 
+        /// Optional bearer token gating `POST /pending/{id}/decide`.
+        /// If set, every decide call must send `Authorization: Bearer
+        /// <token>`. Held separately from `--token` because operator
+        /// (approver) capability is strictly higher than agent capability —
+        /// reusing the agent's bearer would let the agent approve its own
+        /// pendings. Env `WARDEN_LITE_DECIDE_TOKEN`.
+        #[arg(long, env = "WARDEN_LITE_DECIDE_TOKEN")]
+        decide_token: Option<String>,
+
         /// Optional API key forwarded to the upstream as
         /// `Authorization: Bearer <key>`. Use this for OpenAI /
         /// Anthropic / etc. when the agent shouldn't see the key
@@ -128,6 +137,7 @@ async fn main() {
             ledger,
             velocity_window,
             token,
+            decide_token,
             upstream_api_key,
             upstream_timeout_secs,
             mode,
@@ -147,6 +157,7 @@ async fn main() {
                 ledger_path,
                 velocity_window,
                 token,
+                decide_token,
                 upstream_api_key,
                 upstream_timeout,
                 mode,
@@ -183,6 +194,7 @@ struct StartConfig {
     ledger_path: String,
     velocity_window: u64,
     token: Option<String>,
+    decide_token: Option<String>,
     upstream_api_key: Option<String>,
     upstream_timeout: Duration,
     mode: WardenMode,
@@ -239,6 +251,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
         upstream_url: cfg.upstream.clone(),
         http,
         bearer_token: cfg.token.clone(),
+        decide_token: cfg.decide_token.clone(),
         upstream_api_key: cfg.upstream_api_key,
         mode: cfg.mode,
     });
@@ -247,17 +260,14 @@ async fn run_start(cfg: StartConfig) -> i32 {
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
 
     tracing::info!(
-        "warden-lite listening on http://{} (mode={}, upstream={}, policies={}, ledger={}, auth={}, upstream_timeout={}s)",
+        "warden-lite listening on http://{} (mode={}, upstream={}, policies={}, ledger={}, auth={}, decide_auth={}, upstream_timeout={}s)",
         addr,
         match cfg.mode { WardenMode::Enforce => "enforce", WardenMode::Observe => "observe" },
         cfg.upstream,
         cfg.policies.display(),
         cfg.ledger_path,
-        if cfg.token.is_some() {
-            "bearer-token"
-        } else {
-            "open"
-        },
+        if cfg.token.is_some() { "bearer-token" } else { "open" },
+        if cfg.decide_token.is_some() { "bearer-token" } else { "open" },
         cfg.upstream_timeout.as_secs(),
     );
 

@@ -28,7 +28,7 @@
 
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -39,7 +39,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::heuristics::{self, HeuristicVerdict};
-use crate::ledger::{Ledger, LogRequest, ParkRequest};
+use crate::ledger::{DecideError, Ledger, LogRequest, ParkRequest, Pending};
 use crate::policy::{AgentHistory, PolicyDecision, PolicyEngine, PolicyInput};
 
 const CORRELATION_HEADER: &str = "X-Warden-Correlation-Id";
@@ -113,6 +113,13 @@ pub struct AppState {
     /// Optional bearer token for inbound auth. `None` means accept all
     /// connections; safe for `127.0.0.1` developer use.
     pub bearer_token: Option<String>,
+    /// Optional bearer token gating `POST /pending/{id}/decide`. Held
+    /// separately from `bearer_token` because the agent identity that
+    /// drives `/mcp` is a strictly weaker capability than the operator
+    /// identity that approves parked requests — sharing one token would
+    /// silently grant agents the ability to approve their own pendings.
+    /// `None` means decide is open (developer-laptop default).
+    pub decide_token: Option<String>,
     /// Pre-shared upstream API key, injected into the forwarded request
     /// as `Authorization: Bearer <key>`. Same role as the full
     /// edition's Vault credential injection — minus Vault. `None` means
@@ -186,11 +193,205 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(health))
         .route("/mcp", post(handle_mcp))
+        .route("/pending/:id/decide", post(handle_decide_pending))
         .with_state(state)
 }
 
 async fn health() -> &'static str {
     "Agent Warden Lite is active."
+}
+
+/// Decision payload posted by an operator (or by a Slack bot, or the
+/// HIL UI when one exists). `decision` is the only required field;
+/// `note` is a free-text reason that surfaces in the audit ledger.
+#[derive(Debug, Deserialize)]
+struct DecideRequest {
+    decision: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// JSON shape returned by `POST /pending/{id}/decide` and by the
+/// poll endpoint (Wed). Mirrors the SQLite `Pending` row except
+/// `requested_at` / `decided_at` are RFC 3339 strings so the wire
+/// format is language-agnostic.
+#[derive(Debug, Serialize)]
+struct PendingView {
+    correlation_id: String,
+    agent_id: String,
+    tool_type: String,
+    method: String,
+    review_reasons: Vec<String>,
+    requested_at: String,
+    decided_at: Option<String>,
+    decision: Option<String>,
+    decider_note: Option<String>,
+}
+
+impl From<Pending> for PendingView {
+    fn from(p: Pending) -> Self {
+        PendingView {
+            correlation_id: p.correlation_id,
+            agent_id: p.agent_id,
+            tool_type: p.tool_type,
+            method: p.method,
+            review_reasons: p.review_reasons,
+            requested_at: p.requested_at.to_rfc3339(),
+            decided_at: p.decided_at.map(|t| t.to_rfc3339()),
+            decision: p.decision,
+            decider_note: p.decider_note,
+        }
+    }
+}
+
+async fn handle_decide_pending(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    // Decide-token auth, structurally mirrors /mcp's check but reads
+    // a separate token so operator and agent capabilities don't
+    // collapse into one secret. Each response carries a freshly minted
+    // correlation id for access-log tracing — we do NOT reuse the
+    // pending's `id` here because the access-log line tracks the
+    // decide HTTP call, not the original tool call.
+    let decide_corr = Uuid::new_v4().to_string();
+    if let Some(expected) = &state.decide_token {
+        let supplied = headers
+            .get("authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "));
+        let ok = match supplied {
+            Some(s) => constant_time_eq(s.as_bytes(), expected.as_bytes()),
+            None => false,
+        };
+        if !ok {
+            return (
+                StatusCode::UNAUTHORIZED,
+                warden_headers(&decide_corr, state.mode, false, false),
+                "missing or invalid decide token",
+            )
+                .into_response();
+        }
+    }
+
+    let req: DecideRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                warden_headers(&decide_corr, state.mode, false, false),
+                format!("invalid decision body: {}", e),
+            )
+                .into_response();
+        }
+    };
+
+    let decided = match state
+        .ledger
+        .decide_pending(&id, &req.decision, req.note.as_deref())
+        .await
+    {
+        Ok(p) => p,
+        Err(DecideError::NotFound) => {
+            return (
+                StatusCode::NOT_FOUND,
+                warden_headers(&decide_corr, state.mode, false, false),
+                format!("no pending with correlation_id {}", id),
+            )
+                .into_response();
+        }
+        Err(DecideError::AlreadyDecided) => {
+            return (
+                StatusCode::CONFLICT,
+                warden_headers(&decide_corr, state.mode, false, false),
+                "pending already decided",
+            )
+                .into_response();
+        }
+        Err(DecideError::InvalidDecision(d)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                warden_headers(&decide_corr, state.mode, false, false),
+                format!(
+                    "invalid decision {:?}: expected \"allow\" or \"deny\"",
+                    d
+                ),
+            )
+                .into_response();
+        }
+        Err(DecideError::Sqlite(e)) => {
+            tracing::error!("decide_pending sqlite failure: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                warden_headers(&decide_corr, state.mode, false, false),
+                "internal ledger error",
+            )
+                .into_response();
+        }
+    };
+
+    // Forensic chain: write a second ledger entry tied to the same
+    // correlation_id as the park row. `intent_category` distinguishes
+    // the operator-driven decision from the pipeline's original park,
+    // and `authorized` reflects the final outcome (true on allow, false
+    // on deny). The original agent_id is preserved so `audit <agent>`
+    // surfaces both the park and the resolve.
+    let (intent, authorized) = if decided.decision.as_deref() == Some("allow") {
+        ("PendingApproved", true)
+    } else {
+        ("PendingDenied", false)
+    };
+    let reasoning = format_decide_reasoning(&decided);
+    let log_req = LogRequest {
+        agent_id: decided.agent_id.clone(),
+        method: decided.method.clone(),
+        intent_category: intent.to_string(),
+        authorized,
+        reasoning,
+        policy_decision: None,
+        correlation_id: Some(decided.correlation_id.clone()),
+    };
+    if let Err(e) = state.ledger.append(log_req).await {
+        // The pendings row is already flipped, so the operator's
+        // decision is durable; only the audit-trail second row is
+        // missing. Log loudly and still return success — losing the
+        // audit row on a transient SQLite hiccup is the wrong reason
+        // to surface a 500 for a decision the operator already made.
+        tracing::error!("decide-ledger append failed (decision still recorded): {}", e);
+    }
+
+    (
+        StatusCode::OK,
+        warden_headers(&decide_corr, state.mode, false, false),
+        Json(PendingView::from(decided)),
+    )
+        .into_response()
+}
+
+/// Build the audit-string for the decide ledger entry. Includes the
+/// original review reasons (so the audit row tells the full story
+/// without needing to join back to `pendings`) plus the operator's
+/// note when present.
+fn format_decide_reasoning(p: &Pending) -> String {
+    let reviews = if p.review_reasons.is_empty() {
+        "no review reasons".to_string()
+    } else {
+        p.review_reasons.join(" | ")
+    };
+    let note = p
+        .decider_note
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(" | note: {}", s))
+        .unwrap_or_default();
+    format!(
+        "decide[{}] review: {}{}",
+        p.decision.as_deref().unwrap_or("?"),
+        reviews,
+        note
+    )
 }
 
 /// Core request handler — security-first orchestration.
@@ -533,6 +734,7 @@ mod tests {
             upstream_url: "http://127.0.0.1:0/never-called".into(),
             http: reqwest::Client::new(),
             bearer_token: None,
+            decide_token: None,
             upstream_api_key: None,
             mode: WardenMode::Enforce,
         });
