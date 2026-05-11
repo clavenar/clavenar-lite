@@ -199,19 +199,90 @@ warden-lite start --mode observe --upstream https://api.openai.com/v1
 through into the ledger row. Unknown extra fields pass through to
 upstream untouched.
 
-On a security veto, you get HTTP 403 + a structured JSON body:
+Three outcomes are possible:
 
-```json
-{
-  "error": "security_violation",
-  "reasons": ["Violation: Direct execution of SQL queries is prohibited for this agent."],
-  "review_reasons": [],
-  "intent_category": "DangerousTool"
-}
-```
+- **`200 OK`** — green. Allowed. Upstream's response rides through.
+- **`403 Forbidden`** — red. Denied. Body shape:
+  ```json
+  {
+    "error": "security_violation",
+    "reasons": ["Violation: Direct execution of SQL queries is prohibited for this agent."],
+    "review_reasons": [],
+    "intent_category": "DangerousTool"
+  }
+  ```
+- **`202 Accepted`** — yellow. Parked for human review (see the next
+  section). Body shape:
+  ```json
+  {
+    "status": "pending",
+    "correlation_id": "8f1d...",
+    "review_reasons": ["Review: Wire transfers require human approval before execution."]
+  }
+  ```
+
+Every response — including 401, 400, and 5xx — carries an
+`X-Warden-Correlation-Id` header so a partner can pivot from a thrown
+error in SDK code to the matching row in `warden-lite audit`.
 
 Exit codes from the `verify` subcommand are CI-friendly: `0` valid, `2`
 chain corruption detected, `1` runtime error (DB unreadable, etc.).
+
+## Human-in-the-loop: park, poll, decide
+
+When policy returns `allow: true` with `review` non-empty (the
+`wire_transfer` rule in the default `governance.rego` is the
+canonical example), warden-lite parks the request:
+
+1. **Park** — `POST /mcp` returns `202` with `{status, correlation_id,
+   review_reasons}`. The pendings table records the call; one ledger
+   row is written with `intent_category=PendingReview, authorized=false`.
+2. **Poll** — `GET /pending/{correlation_id}` returns the current state:
+   ```json
+   {
+     "correlation_id": "8f1d...",
+     "agent_id": "bearer-agent",
+     "tool_type": "wire_transfer",
+     "method": "call_tool",
+     "review_reasons": ["Review: Wire transfers require human approval before execution."],
+     "requested_at": "2026-05-12T10:14:03Z",
+     "decided_at": null,
+     "decision": null,
+     "decider_note": null
+   }
+   ```
+   The SDK polls this until `decision` flips from `null` to `"allow"`
+   or `"deny"`. Auth: reuses the agent `--token` (same identity that
+   issued the `/mcp` call).
+3. **Decide** — `POST /pending/{correlation_id}/decide` with
+   `{decision: "allow" | "deny", note?}`. Operator-driven. Writes a
+   second ledger row (`PendingApproved` / `PendingDenied`) and flips
+   the pendings row. Idempotent in the failure direction: a second
+   decide returns `409`, never silently overwriting. Auth: separate
+   `--decide-token` so agent bearers cannot approve their own
+   pendings.
+
+```bash
+# Park a wire transfer (in another terminal, agent-side):
+$ curl -sS -X POST http://localhost:8088/mcp \
+    -H 'Authorization: Bearer agent-token' \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"call_tool",
+         "params":{"name":"wire_transfer","arguments":{"to":"acct-1","amount":100}}}'
+# → 202
+# {"status":"pending","correlation_id":"8f1d...","review_reasons":[...]}
+
+# Approve it (operator-side):
+$ curl -sS -X POST http://localhost:8088/pending/8f1d.../decide \
+    -H 'Authorization: Bearer decide-token' \
+    -H 'Content-Type: application/json' \
+    -d '{"decision":"allow","note":"ok by sec"}'
+# → 200 { "decision": "allow", "decided_at": "...", ... }
+```
+
+Auth tokens are independent: set neither for developer-laptop use,
+set just `--token` to gate the agent surface, set both when there's a
+real operator workflow.
 
 ## Customising policy
 
