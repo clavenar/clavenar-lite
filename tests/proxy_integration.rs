@@ -773,6 +773,132 @@ async fn decide_invalid_decision_string_returns_400() {
 }
 
 #[tokio::test]
+async fn poll_returns_pending_before_decision() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) =
+        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let corr = park_wire_transfer(lite_addr).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}/pending/{}", lite_addr, corr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["correlation_id"], serde_json::Value::String(corr.clone()));
+    assert_eq!(body["tool_type"], "wire_transfer");
+    assert!(body["decision"].is_null());
+    assert!(body["decided_at"].is_null());
+    let reviews = body["review_reasons"].as_array().unwrap();
+    assert!(!reviews.is_empty());
+}
+
+#[tokio::test]
+async fn poll_reflects_decision_after_decide() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) =
+        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let corr = park_wire_transfer(lite_addr).await;
+
+    let client = reqwest::Client::new();
+    let decide = client
+        .post(format!("http://{}/pending/{}/decide", lite_addr, corr))
+        .json(&serde_json::json!({ "decision": "allow", "note": "ok by sec" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(decide.status().as_u16(), 200);
+
+    let resp = client
+        .get(format!("http://{}/pending/{}", lite_addr, corr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["decision"], "allow");
+    assert_eq!(body["decider_note"], "ok by sec");
+    assert!(body["decided_at"].is_string());
+}
+
+#[tokio::test]
+async fn poll_unknown_correlation_id_returns_404() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) =
+        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}/pending/no-such-id", lite_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
+#[tokio::test]
+async fn poll_requires_bearer_token_when_configured() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) = spawn_lite(
+        format!("http://{}/mcp", upstream),
+        Some("agent-secret".to_string()),
+    )
+    .await;
+
+    // Park a wire_transfer under the configured bearer.
+    let client = reqwest::Client::new();
+    let park = client
+        .post(format!("http://{}/mcp", lite_addr))
+        .header("Authorization", "Bearer agent-secret")
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "call_tool",
+            "params": {
+                "name": "wire_transfer",
+                "arguments": { "to": "acct-1", "amount": 100 }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(park.status().as_u16(), 202);
+    let corr = park
+        .headers()
+        .get("x-warden-correlation-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // No token → 401.
+    let no_auth = client
+        .get(format!("http://{}/pending/{}", lite_addr, corr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_auth.status().as_u16(), 401);
+
+    // Wrong token → 401.
+    let wrong = client
+        .get(format!("http://{}/pending/{}", lite_addr, corr))
+        .header("Authorization", "Bearer nope")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status().as_u16(), 401);
+
+    // Right token → 200.
+    let ok = client
+        .get(format!("http://{}/pending/{}", lite_addr, corr))
+        .header("Authorization", "Bearer agent-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status().as_u16(), 200);
+}
+
+#[tokio::test]
 async fn decide_token_required_when_configured() {
     let upstream = spawn_stub_upstream().await;
     let (lite_addr, _ledger) = spawn_lite_with_decide_token(
