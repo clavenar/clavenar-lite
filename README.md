@@ -17,14 +17,16 @@ Pick whichever surface fits how you ship today. All three boot with
 **Container** (no Rust toolchain needed):
 
 ```bash
-git clone https://github.com/vanteguardlabs/warden-lite
-cd warden-lite
-docker build -t warden-lite .
 docker run -p 8088:8088 \
   -e WARDEN_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completions \
   -e WARDEN_LITE_MODE=observe \
-  warden-lite
+  ghcr.io/vanteguardlabs/warden-lite:latest
 ```
+
+The image is multi-arch (`linux/amd64` + `linux/arm64`), published from
+the [release workflow](.github/workflows/release.yml) on every `v*`
+tag. Pin to `:0.2.0` if you want a fixed version; `:latest` tracks the
+newest tagged release.
 
 **Fly.io** (deploy button above, or):
 

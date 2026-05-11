@@ -7,7 +7,9 @@ name: release
 # What this ships:
 #   1. Multi-arch container image (linux/amd64 + linux/arm64) at
 #      ghcr.io/vanteguardlabs/warden-lite:{version} + :latest.
-#   2. A GitHub release with the matching CHANGELOG.md section as
+#   2. Static linux-x86_64 binary (musl) as a release asset, for
+#      partners who want the binary outside a container.
+#   3. A GitHub release with the matching CHANGELOG.md section as
 #      the release body.
 #
 # First-time setup: after the first successful release run, flip
@@ -82,10 +84,41 @@ jobs:
           echo "---release-notes.md---"
           cat release-notes.md
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl-release
+
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static linux-x86_64 binary
+        run: |
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+          BIN=target/x86_64-unknown-linux-musl/release/warden-lite
+          file "$BIN"
+          # Sanity: assert it really is static — dynamic libc linkage
+          # defeats the entire reason we ship a musl build.
+          if ldd "$BIN" 2>&1 | grep -qE '=>'; then
+            echo "::error::binary is not statically linked"
+            ldd "$BIN" || true
+            exit 1
+          fi
+          VERSION="${{ steps.ver.outputs.version }}"
+          ASSET="warden-lite-${VERSION}-x86_64-linux-musl.tar.gz"
+          tar -czf "$ASSET" -C "$(dirname "$BIN")" "$(basename "$BIN")"
+          sha256sum "$ASSET" | tee "${ASSET}.sha256"
+          echo "asset=$ASSET" >> "$GITHUB_ENV"
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "${GITHUB_REF_NAME} — warden-lite" \
-            --notes-file release-notes.md
+            --notes-file release-notes.md \
+            "$asset" \
+            "${asset}.sha256"
