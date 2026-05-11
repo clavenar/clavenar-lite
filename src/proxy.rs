@@ -41,6 +41,29 @@ use crate::heuristics::{self, HeuristicVerdict};
 use crate::ledger::{Ledger, LogRequest};
 use crate::policy::{AgentHistory, PolicyDecision, PolicyEngine, PolicyInput};
 
+/// Enforcement posture. `Enforce` is the default and returns 403 on a
+/// would-deny; `Observe` is the rollout knob — every request forwards
+/// upstream regardless of the security pipeline's verdict, and the
+/// response carries `X-Warden-Would-Deny: true` for partners who want
+/// to count would-have-denies before they flip enforcement on. The
+/// ledger entry is unaffected: `authorized=false` still gets written
+/// for a would-deny in observe mode, so the audit trail of what the
+/// pipeline *would* have done stays accurate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WardenMode {
+    Enforce,
+    Observe,
+}
+
+impl WardenMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            WardenMode::Enforce => "enforce",
+            WardenMode::Observe => "observe",
+        }
+    }
+}
+
 /// Shared state behind an `Arc`. Cloned per-request via `State<Arc<...>>`.
 pub struct AppState {
     pub policy: Arc<PolicyEngine>,
@@ -55,6 +78,8 @@ pub struct AppState {
     /// edition's Vault credential injection — minus Vault. `None` means
     /// don't inject (the upstream is responsible for its own auth).
     pub upstream_api_key: Option<String>,
+    /// Enforcement posture (see {@link WardenMode}).
+    pub mode: WardenMode,
 }
 
 /// Wire shape for the `POST /mcp` request body. We accept any JSON
@@ -209,7 +234,8 @@ async fn handle_mcp(
         tracing::warn!("ledger append failed: {}", e);
     }
 
-    if !allowed {
+    let would_deny = !allowed;
+    if !allowed && state.mode == WardenMode::Enforce {
         // Combine policy + brain reasons so the agent-side caller sees
         // the full audit string in one place. `review_reasons` is kept
         // separate in the JSON so callers that key on it (e.g., a
@@ -224,8 +250,17 @@ async fn handle_mcp(
             review_reasons: policy.review_reasons.clone(),
             intent_category: brain.intent_category.clone(),
         };
-        return (StatusCode::FORBIDDEN, Json(resp)).into_response();
+        let mut deny_headers = HeaderMap::new();
+        deny_headers.insert(
+            "X-Warden-Mode",
+            state.mode.as_str().parse().expect("mode is ascii"),
+        );
+        return (StatusCode::FORBIDDEN, deny_headers, Json(resp)).into_response();
     }
+    // Observe mode falls through to the upstream forward even when
+    // the pipeline would have denied — the partner still gets a real
+    // response, and X-Warden-Would-Deny below tells them what enforce
+    // mode would have done.
 
     // -------- Forward upstream --------
     let mut req_builder = state
@@ -265,7 +300,18 @@ async fn handle_mcp(
     // numeric status; the body rides through as `Bytes`.
     let out_status = StatusCode::from_u16(status.as_u16())
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    (out_status, upstream_body).into_response()
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "X-Warden-Mode",
+        state.mode.as_str().parse().expect("mode is ascii"),
+    );
+    if would_deny {
+        headers.insert(
+            "X-Warden-Would-Deny",
+            "true".parse().expect("static ascii"),
+        );
+    }
+    (out_status, headers, upstream_body).into_response()
 }
 
 /// Byte-equality in time proportional to `expected.len()`. Used for
@@ -357,6 +403,7 @@ mod tests {
             http: reqwest::Client::new(),
             bearer_token: None,
             upstream_api_key: None,
+            mode: WardenMode::Enforce,
         });
     }
 }
