@@ -4,6 +4,54 @@ All notable changes to `warden-lite` are documented here. Format based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-05-11
+
+Yellow-tier release. Pairs with
+[`@vanteguardlabs/warden-ai-sdk`](https://www.npmjs.com/package/@vanteguardlabs/warden-ai-sdk)
+v0.2.0+'s async-HIL flow. Adds the wire contract for parking
+risky-but-not-banned tool calls for operator approval — a third
+verdict between `200 OK` (green) and `403 Forbidden` (red).
+
+### Added
+
+- **`202 Accepted` from `/mcp`** when the Rego policy's `review` rule
+  fires alongside `allow := true`. Body is
+  `{status, correlation_id, review_reasons}`; the request is parked in
+  a new `pendings` SQLite table awaiting a decide call. The hash chain
+  keeps the existing entry shape — `pendings` is a separate table,
+  deliberately not part of `HashableEntryV1`, so chains produced by
+  lite remain byte-compatible with the full edition's verifier.
+- **`POST /pending/:id/decide`** — operator capability. Accepts
+  `{decision: "allow" | "deny", note?: string}`. Single-decision: a
+  second decide call against the same correlation id returns
+  `409 Conflict`. A second ledger entry (`PendingApproved` /
+  `PendingDenied`) is written tied to the same correlation id, so the
+  audit trail captures both the original park and the final outcome.
+  Gated by `--decide-token` / `WARDEN_LITE_DECIDE_TOKEN` — distinct
+  from the agent bearer token so an agent cannot self-approve.
+- **`GET /pending/:id`** — poll endpoint returning the full pending
+  view (status, decision, decider_note, RFC 3339 timestamps).
+- **Static linux-x86_64 binary** as a GitHub release asset
+  (`warden-lite-<version>-x86_64-linux-musl.tar.gz` + matching
+  `.sha256`). Built with musl, fully static, no glibc dependency. For
+  partners who want the binary on a host without docker.
+- README "Container" snippet now pulls
+  `ghcr.io/vanteguardlabs/warden-lite:latest` directly instead of
+  `git clone + docker build`.
+
+### Migration notes
+
+- Existing 200/403 callers unaffected — yellow tier only fires when
+  the policy emits both `allow := true` and a non-empty `review` set.
+  The default `governance.rego` ships with a `review` rule for
+  `wire_transfer`; older policy bundles without any `review` rules
+  retain v0.2.0's binary behavior.
+- The Rego `allow` rule previously suppressed itself when `review`
+  was non-empty (collapsing yellow into red). It now only checks
+  `count(deny) == 0`. If you have a custom policy that relied on the
+  old behavior, gate the `review` rule on whatever conditions you
+  wanted to deny outright.
+
 ## [0.2.0] - 2026-05-11
 
 Trust-onboarding release. Adds the rollout knob (observe mode), the
@@ -54,5 +102,6 @@ with the embedded heuristic Brain, `regorus`-backed Rego policy
 engine, SHA-256 hash-chained SQLite ledger, and axum proxy. Wire
 format and chain shape are byte-compatible with the full edition.
 
+[0.3.0]: https://github.com/vanteguardlabs/warden-lite/releases/tag/v0.3.0
 [0.2.0]: https://github.com/vanteguardlabs/warden-lite/releases/tag/v0.2.0
 [0.1.0]: https://github.com/vanteguardlabs/warden-lite/releases/tag/v0.1.0
