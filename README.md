@@ -36,13 +36,19 @@ fly secrets set WARDEN_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completi
 fly deploy
 ```
 
-**Local** (Rust toolchain installed):
+**Static binary** (no Rust toolchain, no docker):
 
 ```bash
-cargo install warden-lite
-warden-lite start --mode observe \
+V=0.3.0
+curl -fsSL "https://github.com/vanteguardlabs/warden-lite/releases/download/v${V}/warden-lite-${V}-x86_64-linux-musl.tar.gz" \
+  | tar -xz
+./warden-lite start --mode observe \
   --upstream https://api.openai.com/v1/chat/completions
 ```
+
+Linux x86_64, fully static (musl) — no glibc dependency, no system
+libsqlite. A `.sha256` companion file is published alongside if you
+want to verify before extracting.
 
 Hit it once to confirm:
 
