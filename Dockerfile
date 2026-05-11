@@ -1,0 +1,60 @@
+# syntax=docker/dockerfile:1.7
+#
+# Multi-stage build for warden-lite. Stage 1 produces the release
+# binary against rust:1-bookworm; stage 2 lands the binary on
+# debian:bookworm-slim with the bundled default policies and runs
+# under the standard distroless-ish nonroot UID 65532.
+#
+# Built artifact runs on port 8088 by default; mount a policy
+# directory or use the bundled governance.rego baseline. SQLite
+# ledger defaults to :memory: so the container is stateless out of
+# the box — set WARDEN_LITE_LEDGER=/var/lib/warden-lite/ledger.db and
+# bind-mount a volume for persistence.
+
+# ---------- builder ----------
+FROM rust:1-bookworm AS builder
+
+WORKDIR /build
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY policies ./policies
+
+# Build the release binary. Docker's layer cache keeps the COPY +
+# `cargo fetch`-warmed dependency graph hot across rebuilds that only
+# change source files, so iteration is cheap after the first build.
+RUN cargo build --release --locked --bin warden-lite
+
+# ---------- runtime ----------
+FROM debian:bookworm-slim AS runtime
+
+# ca-certificates so reqwest can do TLS to upstream APIs; tini as
+# PID 1 for clean signal handling in container runtimes that don't
+# forward SIGTERM correctly. libsqlite is statically linked into the
+# binary via rusqlite/bundled — no system sqlite needed.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tini && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /etc/warden-lite/policies /var/lib/warden-lite && \
+    chown -R 65532:65532 /var/lib/warden-lite
+
+COPY --from=builder /build/target/release/warden-lite /usr/local/bin/warden-lite
+COPY --from=builder /build/policies /etc/warden-lite/policies
+
+USER 65532:65532
+
+# Read every knob from env so a `fly secrets set WARDEN_LITE_TOKEN=...`
+# or `docker run -e WARDEN_LITE_UPSTREAM_URL=...` works without an
+# argv override. CLI flags still win when passed.
+ENV WARDEN_LITE_PORT=8088 \
+    WARDEN_LITE_POLICY_DIR=/etc/warden-lite/policies \
+    WARDEN_LITE_LEDGER=:memory: \
+    WARDEN_LITE_MODE=enforce \
+    RUST_LOG=info
+
+EXPOSE 8088
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/warden-lite"]
+CMD ["start"]

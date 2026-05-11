@@ -1,0 +1,19 @@
+# Keep the build context lean. target/ is enormous and we rebuild
+# inside the image anyway; tests/ and benches/ don't influence the
+# release binary; .github/ + docs don't affect the runtime.
+target/
+.git/
+.github/
+tests/
+*.log
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+warden-lite-target/
+.idea/
+.vscode/
+README.md
+SECURITY.md
+deny.toml
+fly.toml
