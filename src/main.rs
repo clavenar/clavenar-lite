@@ -18,7 +18,7 @@ use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 use warden_lite::ledger::Ledger;
 use warden_lite::policy::PolicyEngine;
-use warden_lite::proxy::{build_router, AppState};
+use warden_lite::proxy::{build_router, AppState, WardenMode};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -81,6 +81,14 @@ enum Command {
         /// Default 120. Env `WARDEN_LITE_UPSTREAM_TIMEOUT_SECS`.
         #[arg(long, env = "WARDEN_LITE_UPSTREAM_TIMEOUT_SECS")]
         upstream_timeout_secs: Option<u64>,
+
+        /// Enforcement mode. `enforce` (default) returns 403 on
+        /// would-deny; `observe` forwards every request upstream and
+        /// surfaces the would-deny via the `X-Warden-Would-Deny`
+        /// response header. Use observe for the rollout phase before
+        /// you trust the policies. Env `WARDEN_LITE_MODE`.
+        #[arg(long, env = "WARDEN_LITE_MODE", value_parser = parse_mode)]
+        mode: Option<WardenMode>,
     },
 
     /// Walk every entry in the ledger and confirm the hash chain is
@@ -122,6 +130,7 @@ async fn main() {
             token,
             upstream_api_key,
             upstream_timeout_secs,
+            mode,
         } => {
             let port = port.unwrap_or(8088);
             let upstream = upstream.unwrap_or_else(|| "http://localhost:9000/mcp".into());
@@ -129,6 +138,7 @@ async fn main() {
             let ledger_path = ledger.unwrap_or_else(|| "./warden-lite.db".into());
             let velocity_window = velocity_window.unwrap_or(60);
             let upstream_timeout = Duration::from_secs(upstream_timeout_secs.unwrap_or(120));
+            let mode = mode.unwrap_or(WardenMode::Enforce);
 
             run_start(StartConfig {
                 port,
@@ -139,6 +149,7 @@ async fn main() {
                 token,
                 upstream_api_key,
                 upstream_timeout,
+                mode,
             })
             .await
         }
@@ -174,6 +185,20 @@ struct StartConfig {
     token: Option<String>,
     upstream_api_key: Option<String>,
     upstream_timeout: Duration,
+    mode: WardenMode,
+}
+
+/// Parse `--mode` / `WARDEN_LITE_MODE` into a {@link WardenMode}.
+/// Accepts `enforce` / `observe`, case-insensitive.
+fn parse_mode(s: &str) -> Result<WardenMode, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "enforce" => Ok(WardenMode::Enforce),
+        "observe" => Ok(WardenMode::Observe),
+        other => Err(format!(
+            "invalid mode {:?}: expected 'enforce' or 'observe'",
+            other
+        )),
+    }
 }
 
 async fn run_start(cfg: StartConfig) -> i32 {
@@ -215,14 +240,16 @@ async fn run_start(cfg: StartConfig) -> i32 {
         http,
         bearer_token: cfg.token.clone(),
         upstream_api_key: cfg.upstream_api_key,
+        mode: cfg.mode,
     });
 
     let app = build_router(state);
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
 
     tracing::info!(
-        "warden-lite listening on http://{} (upstream={}, policies={}, ledger={}, auth={}, upstream_timeout={}s)",
+        "warden-lite listening on http://{} (mode={}, upstream={}, policies={}, ledger={}, auth={}, upstream_timeout={}s)",
         addr,
+        match cfg.mode { WardenMode::Enforce => "enforce", WardenMode::Observe => "observe" },
         cfg.upstream,
         cfg.policies.display(),
         cfg.ledger_path,
