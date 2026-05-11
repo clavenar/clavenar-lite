@@ -118,6 +118,37 @@ pub struct VerifyResult {
     pub unsupported_chain_version: Option<i64>,
 }
 
+/// A request that the security pipeline parked for human review
+/// (yellow tier — `policy.allow && !review_reasons.is_empty()`). Lives
+/// in its own SQLite table alongside the hash-chained ledger.
+/// Deliberately NOT part of the hash chain: pendings are operational
+/// state that flips when an operator decides, while the ledger is
+/// append-only forensic history. The ledger gets a row at park time
+/// (intent_category="PendingReview", authorized=false) and a second
+/// row at decide time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pending {
+    pub correlation_id: String,
+    pub agent_id: String,
+    pub tool_type: String,
+    pub method: String,
+    pub review_reasons: Vec<String>,
+    pub requested_at: DateTime<Utc>,
+    pub decided_at: Option<DateTime<Utc>>,
+    /// `"allow"` or `"deny"` when set; `None` while awaiting decision.
+    pub decision: Option<String>,
+    pub decider_note: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParkRequest {
+    pub correlation_id: String,
+    pub agent_id: String,
+    pub tool_type: String,
+    pub method: String,
+    pub review_reasons: Vec<String>,
+}
+
 pub struct Ledger {
     conn: Arc<Mutex<Connection>>,
 }
@@ -253,6 +284,59 @@ impl Ledger {
         })
     }
 
+    /// Park a yellow-tier request awaiting human review. Inserts one
+    /// row in `pendings` keyed by `correlation_id`; returns the parked
+    /// record. The caller is expected to also write a `LedgerEntry`
+    /// with `intent_category="PendingReview", authorized=false` so the
+    /// forensic chain reflects the park.
+    pub async fn park_pending(&self, req: ParkRequest) -> rusqlite::Result<Pending> {
+        let conn = self.conn.lock().await;
+        let requested_at = Utc::now();
+        let review_reasons_json = serde_json::to_string(&req.review_reasons)
+            .unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT INTO pendings (correlation_id, agent_id, tool_type, method,
+                                   review_reasons_json, requested_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                req.correlation_id,
+                req.agent_id,
+                req.tool_type,
+                req.method,
+                review_reasons_json,
+                requested_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(Pending {
+            correlation_id: req.correlation_id,
+            agent_id: req.agent_id,
+            tool_type: req.tool_type,
+            method: req.method,
+            review_reasons: req.review_reasons,
+            requested_at,
+            decided_at: None,
+            decision: None,
+            decider_note: None,
+        })
+    }
+
+    /// Look up a pending by correlation id. Returns `None` if no such
+    /// row exists. The pending row may be already-decided — callers
+    /// inspect `decision` to tell.
+    pub async fn get_pending(&self, correlation_id: &str) -> rusqlite::Result<Option<Pending>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
+                    requested_at, decided_at, decision, decider_note
+             FROM pendings WHERE correlation_id = ?1",
+        )?;
+        let mut rows = stmt.query([correlation_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row_to_pending(row)?)),
+            None => Ok(None),
+        }
+    }
+
     /// Return every entry for `agent_id`, in seq order. Used by `audit`
     /// CLI subcommand.
     pub async fn entries_for_agent(&self, agent_id: &str) -> rusqlite::Result<Vec<LedgerEntry>> {
@@ -287,7 +371,19 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
          );
          CREATE INDEX IF NOT EXISTS idx_entries_agent_id ON entries(agent_id);
          CREATE INDEX IF NOT EXISTS idx_entries_seq ON entries(seq);
-         CREATE INDEX IF NOT EXISTS idx_entries_correlation_id ON entries(correlation_id);",
+         CREATE INDEX IF NOT EXISTS idx_entries_correlation_id ON entries(correlation_id);
+         CREATE TABLE IF NOT EXISTS pendings (
+            correlation_id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            tool_type TEXT NOT NULL,
+            method TEXT NOT NULL,
+            review_reasons_json TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            decided_at TEXT,
+            decision TEXT,
+            decider_note TEXT
+         );
+         CREATE INDEX IF NOT EXISTS idx_pendings_decided_at ON pendings(decided_at);",
     )?;
 
     // Idempotent migrations for legacy DBs. Each ALTER adds one
@@ -354,6 +450,49 @@ fn recompute_for_version(version: i64, entry: &LedgerEntry) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn row_to_pending(row: &rusqlite::Row) -> rusqlite::Result<Pending> {
+    let correlation_id: String = row.get(0)?;
+    let agent_id: String = row.get(1)?;
+    let tool_type: String = row.get(2)?;
+    let method: String = row.get(3)?;
+    let review_reasons_json: String = row.get(4)?;
+    let requested_at_str: String = row.get(5)?;
+    let decided_at_str: Option<String> = row.get(6)?;
+    let decision: Option<String> = row.get(7)?;
+    let decider_note: Option<String> = row.get(8)?;
+    let review_reasons: Vec<String> =
+        serde_json::from_str(&review_reasons_json).unwrap_or_default();
+    let requested_at = DateTime::parse_from_rfc3339(&requested_at_str)
+        .map(|t| t.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+    let decided_at = decided_at_str
+        .map(|s| {
+            DateTime::parse_from_rfc3339(&s)
+                .map(|t| t.with_timezone(&Utc))
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        6,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })
+        })
+        .transpose()?;
+    Ok(Pending {
+        correlation_id,
+        agent_id,
+        tool_type,
+        method,
+        review_reasons,
+        requested_at,
+        decided_at,
+        decision,
+        decider_note,
+    })
 }
 
 fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
@@ -462,6 +601,37 @@ mod tests {
         assert!(!v.valid);
         assert_eq!(v.first_invalid_seq, None);
         assert_eq!(v.unsupported_chain_version, Some(99));
+    }
+
+    #[tokio::test]
+    async fn park_pending_round_trips_through_get() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        let parked = ledger
+            .park_pending(ParkRequest {
+                correlation_id: "abc-123".to_string(),
+                agent_id: "agent-1".to_string(),
+                tool_type: "transfer_funds".to_string(),
+                method: "call_tool".to_string(),
+                review_reasons: vec!["Wire transfers require approval".to_string()],
+            })
+            .await
+            .unwrap();
+        assert_eq!(parked.correlation_id, "abc-123");
+        assert!(parked.decided_at.is_none());
+        assert!(parked.decision.is_none());
+
+        let fetched = ledger.get_pending("abc-123").await.unwrap().unwrap();
+        assert_eq!(fetched.agent_id, "agent-1");
+        assert_eq!(fetched.tool_type, "transfer_funds");
+        assert_eq!(fetched.review_reasons, vec!["Wire transfers require approval"]);
+        assert!(fetched.decision.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_pending_returns_none_for_unknown_correlation_id() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        let missing = ledger.get_pending("does-not-exist").await.unwrap();
+        assert!(missing.is_none());
     }
 
     #[tokio::test]
