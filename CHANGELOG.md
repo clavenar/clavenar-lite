@@ -4,6 +4,24 @@ All notable changes to `warden-lite` are documented here. Format based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Week-6 partner-readiness bundle. Targets a v0.4.0 cut at end-of-week
+once Slack webhook + fresh-host smoke test + demo wiring land.
+
+### Added
+
+- **`GET /pending`** — operator list endpoint. Query params:
+  `?status=parked|decided|all` (default `parked`), `?limit=N` (default
+  50, server hard-cap 500). Returns array of pending views, newest
+  requested first. Requires `--decide-token` if configured.
+- **`warden-lite pending {list,get,decide}`** CLI subcommands. Talks
+  to a running warden-lite over HTTP; same wire contract as the
+  endpoints. `pending list` prints a table by default, `--json` for
+  scripting. `pending decide` takes `--allow` or `--deny` (mutually
+  exclusive) + optional `--note`. Falls back to `WARDEN_LITE_URL`,
+  `WARDEN_LITE_DECIDE_TOKEN`, `WARDEN_LITE_TOKEN` envs.
+
 ## [0.3.0] - 2026-05-11
 
 Yellow-tier release. Pairs with

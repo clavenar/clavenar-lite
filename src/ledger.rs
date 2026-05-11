@@ -140,6 +140,16 @@ pub struct Pending {
     pub decider_note: Option<String>,
 }
 
+/// Status filter for `Ledger::list_pendings`. `Parked` is the default
+/// operator triage view — undecided rows waiting on a human. `Decided`
+/// surfaces history; `All` is a debug knob.
+#[derive(Debug, Clone, Copy)]
+pub enum PendingFilter {
+    Parked,
+    Decided,
+    All,
+}
+
 #[derive(Debug, Clone)]
 pub struct ParkRequest {
     pub correlation_id: String,
@@ -418,6 +428,32 @@ impl Ledger {
             decider_note: note.map(str::to_string),
             ..pending
         })
+    }
+
+    /// List pending rows, newest-requested first, filtered by decision
+    /// state. `limit` caps the result set — partner-facing CLI defaults
+    /// to 50, server caps at 500 so a misconfigured client can't
+    /// exhaust memory ordering a million rows.
+    pub async fn list_pendings(
+        &self,
+        filter: PendingFilter,
+        limit: u32,
+    ) -> rusqlite::Result<Vec<Pending>> {
+        let conn = self.conn.lock().await;
+        let where_clause = match filter {
+            PendingFilter::Parked => "WHERE decided_at IS NULL",
+            PendingFilter::Decided => "WHERE decided_at IS NOT NULL",
+            PendingFilter::All => "",
+        };
+        let sql = format!(
+            "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
+                    requested_at, decided_at, decision, decider_note
+             FROM pendings {} ORDER BY requested_at DESC LIMIT ?1",
+            where_clause
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([limit], row_to_pending)?;
+        rows.collect()
     }
 
     /// Look up a pending by correlation id. Returns `None` if no such
