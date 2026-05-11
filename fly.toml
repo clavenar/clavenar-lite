@@ -1,0 +1,52 @@
+# fly.toml — warden-lite deploy template
+#
+# `fly launch` will pick this up. Override `app` to your own slug
+# (Fly requires globally-unique app names; this template uses a
+# placeholder).
+#
+# Defaults are tuned for the 60-second deploy story: shared CPU,
+# observe mode so first traffic doesn't 403, in-memory ledger so
+# there's no volume to provision before traffic flows. Flip to
+# enforce + a real ledger before you wire production agents at it
+# — see README "Promoting to production".
+
+app = "warden-lite"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = "15s"
+
+[build]
+dockerfile = "Dockerfile"
+
+[env]
+# Start partners off in observe so the first request through the
+# proxy doesn't 403 and burn the demo. Flip to enforce via
+# `fly secrets set WARDEN_LITE_MODE=enforce` once the verdicts
+# are trustworthy.
+WARDEN_LITE_MODE = "observe"
+# Point at OpenAI by default so a copy-paste fly launch yields a
+# working LLM proxy. Override to your real upstream.
+WARDEN_LITE_UPSTREAM_URL = "https://api.openai.com/v1/chat/completions"
+RUST_LOG = "info"
+
+[http_service]
+internal_port = 8088
+force_https = true
+# Auto-stop keeps the free-tier deploy cheap when traffic is bursty;
+# auto-start brings the machine back on the next request, ~2s cold start.
+auto_stop_machines = "stop"
+auto_start_machines = true
+min_machines_running = 0
+processes = ["app"]
+
+[[http_service.checks]]
+grace_period = "5s"
+interval = "30s"
+method = "GET"
+timeout = "5s"
+path = "/"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"
+cpus = 1
