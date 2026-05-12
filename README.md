@@ -132,6 +132,12 @@ For real traffic, layer these on top of the default deploy:
 - **Ingress auth.** Set `WARDEN_LITE_TOKEN`; partners then send
   `Authorization: Bearer <token>` and unauthenticated requests get
   401. Without it the proxy accepts every connection.
+- **Multi-agent.** Set `WARDEN_LITE_AGENTS=agent-a:tok-a,agent-b:tok-b`
+  to front N agents from one binary. Each token gets its own
+  `agent_id` on the ledger and in `input.agent_id` so Rego rules
+  can scope tool access per agent. Mutually exclusive with the
+  single-agent `WARDEN_LITE_TOKEN`; both being set picks the
+  registry. Tokens must be unique across agents.
 - **Upstream creds.** `WARDEN_LITE_UPSTREAM_API_KEY` injects the key
   into forwarded requests so your agent never sees it. Same shape
   as the full edition's Vault injection, minus Vault.
@@ -142,9 +148,9 @@ For real traffic, layer these on top of the default deploy:
 
 ```
 warden-lite start [--port N] [--upstream URL] [--policies DIR] [--ledger PATH]
-                  [--velocity-window SECS] [--token TOKEN] [--decide-token TOKEN]
-                  [--upstream-api-key KEY] [--upstream-timeout-secs SECS]
-                  [--slack-webhook-url URL]
+                  [--velocity-window SECS] [--token TOKEN] [--agents SPEC]
+                  [--decide-token TOKEN] [--upstream-api-key KEY]
+                  [--upstream-timeout-secs SECS] [--slack-webhook-url URL]
 warden-lite verify [--ledger PATH]
 warden-lite audit  [--ledger PATH] <agent_id>
 warden-lite pending list   [--endpoint URL] [--decide-token TOKEN]
@@ -169,6 +175,7 @@ Every flag falls back to a `WARDEN_LITE_*` env var:
 | `--ledger`                 | `WARDEN_LITE_LEDGER`                 | ./warden-lite.db          |
 | `--velocity-window`        | `WARDEN_LITE_VELOCITY_WINDOW_SECS`   | 60                        |
 | `--token`                  | `WARDEN_LITE_TOKEN`                  | (none — open access)      |
+| `--agents`                 | `WARDEN_LITE_AGENTS`                 | (none — single-agent)     |
 | `--upstream-api-key`       | `WARDEN_LITE_UPSTREAM_API_KEY`       | (none — pass-through)     |
 | `--upstream-timeout-secs`  | `WARDEN_LITE_UPSTREAM_TIMEOUT_SECS`  | 120                       |
 | `--mode`                   | `WARDEN_LITE_MODE`                   | `enforce`                 |

@@ -21,10 +21,21 @@
 //! # Authentication
 //!
 //! Lite supports an optional bearer-token auth pre-shared via
-//! `WARDEN_LITE_TOKEN`. If unset, the proxy accepts every connection
-//! (fine for `127.0.0.1` developer use). If set, every request must
-//! send `Authorization: Bearer <token>` or it's 401. mTLS is the full
-//! edition's job.
+//! `WARDEN_LITE_TOKEN` or — for multi-agent deployments — an explicit
+//! `WARDEN_LITE_AGENTS` registry mapping tokens to agent ids. If
+//! neither is configured, the proxy accepts every connection (fine
+//! for `127.0.0.1` developer use). If either is configured, every
+//! request must send `Authorization: Bearer <token>` or it's 401.
+//! mTLS is the full edition's job.
+//!
+//! ## Multi-agent
+//!
+//! `WARDEN_LITE_AGENTS=agent-a:tok-a,agent-b:tok-b` registers two
+//! distinct agents behind the same proxy. The token that matched
+//! determines the `agent_id` recorded on the ledger entry and surfaced
+//! to the policy engine — Rego rules can branch on `input.agent_id`
+//! to scope tool access per agent. Tokens must be unique across
+//! agents; duplicates fail boot.
 
 use axum::{
     body::Bytes,
@@ -35,6 +46,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -106,15 +118,113 @@ impl WardenMode {
     }
 }
 
+/// Maps a bearer token to a per-agent identity. `None` in
+/// `AppState.agents` means inbound auth is disabled entirely (every
+/// request is treated as `agent_id="anonymous"`); a single-entry
+/// registry built from `WARDEN_LITE_TOKEN` keeps the v0.x
+/// single-agent default of `agent_id="bearer-agent"`; a multi-entry
+/// registry built from `WARDEN_LITE_AGENTS` gives each token its own
+/// `agent_id`.
+#[derive(Debug, Clone)]
+pub struct AgentRegistry {
+    by_token: HashMap<String, String>,
+}
+
+impl AgentRegistry {
+    /// Build a registry from the v0.x single-token form. Used as the
+    /// fallback when `WARDEN_LITE_AGENTS` is unset but `WARDEN_LITE_TOKEN`
+    /// is set — the lone token maps to `agent_id="bearer-agent"`.
+    pub fn single(token: String) -> Self {
+        let mut by_token = HashMap::new();
+        by_token.insert(token, "bearer-agent".to_string());
+        Self { by_token }
+    }
+
+    /// Build a multi-agent registry from the `id:token,id:token` form
+    /// of `WARDEN_LITE_AGENTS`. Tokens must be unique; agent ids must
+    /// be non-empty and may contain `[A-Za-z0-9_-]`. Duplicate tokens
+    /// or malformed entries return `Err` so the binary exits at boot.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let mut by_token: HashMap<String, String> = HashMap::new();
+        for raw in spec.split(',') {
+            let entry = raw.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let (id, token) = entry
+                .split_once(':')
+                .ok_or_else(|| format!("agent registry entry missing ':' separator: {entry:?}"))?;
+            let id = id.trim();
+            let token = token.trim();
+            if id.is_empty() {
+                return Err(format!("agent registry entry has empty id: {entry:?}"));
+            }
+            if token.is_empty() {
+                return Err(format!("agent registry entry {id:?} has empty token"));
+            }
+            if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                return Err(format!(
+                    "agent registry id {id:?} must match [A-Za-z0-9_-]"
+                ));
+            }
+            if let Some(existing) = by_token.insert(token.to_string(), id.to_string()) {
+                return Err(format!(
+                    "agent registry has duplicate token shared by {existing:?} and {id:?}"
+                ));
+            }
+        }
+        if by_token.is_empty() {
+            return Err("agent registry is empty (no id:token pairs parsed)".to_string());
+        }
+        Ok(Self { by_token })
+    }
+
+    /// Lookup agent_id for a supplied bearer token. `None` means the
+    /// token does not match any registered agent and the request
+    /// should be rejected with 401.
+    pub fn lookup(&self, token: &str) -> Option<&str> {
+        // Constant-time compare per-entry — the matching prefix length
+        // does not leak via response timing.
+        for (registered_token, agent_id) in &self.by_token {
+            if constant_time_eq(token.as_bytes(), registered_token.as_bytes()) {
+                return Some(agent_id);
+            }
+        }
+        None
+    }
+
+    /// Count of registered agents. Used by the boot log.
+    pub fn len(&self) -> usize {
+        self.by_token.len()
+    }
+
+    /// Always non-empty after a successful build (`parse` and
+    /// `single` both refuse to construct an empty registry); the
+    /// method exists only to satisfy `clippy::len_without_is_empty`.
+    pub fn is_empty(&self) -> bool {
+        self.by_token.is_empty()
+    }
+
+    /// Pretty-print the registered agent ids (not the tokens) for
+    /// boot logging.
+    pub fn agent_ids(&self) -> Vec<&str> {
+        let mut ids: Vec<&str> = self.by_token.values().map(String::as_str).collect();
+        ids.sort_unstable();
+        ids
+    }
+}
+
 /// Shared state behind an `Arc`. Cloned per-request via `State<Arc<...>>`.
 pub struct AppState {
     pub policy: Arc<PolicyEngine>,
     pub ledger: Arc<Ledger>,
     pub upstream_url: String,
     pub http: reqwest::Client,
-    /// Optional bearer token for inbound auth. `None` means accept all
-    /// connections; safe for `127.0.0.1` developer use.
-    pub bearer_token: Option<String>,
+    /// Optional per-agent identity registry. `None` means inbound auth
+    /// is disabled (developer-laptop default). A single-entry registry
+    /// preserves the v0.x `bearer-agent` behavior; a multi-entry
+    /// registry gives each token a distinct `agent_id`.
+    pub agents: Option<AgentRegistry>,
     /// Optional bearer token gating `POST /pending/{id}/decide`. Held
     /// separately from `bearer_token` because the agent identity that
     /// drives `/mcp` is a strictly weaker capability than the operator
@@ -401,21 +511,18 @@ async fn handle_get_pending(
 ) -> Response {
     let poll_corr = Uuid::new_v4().to_string();
 
-    // Reuse the agent-facing `bearer_token` for poll auth. Polling is
-    // a strictly read-only capability the SDK needs after parking a
-    // tool call, so the same identity that issued the `/mcp` call is
-    // the natural caller. Lite does not scope polls per-correlation-id —
-    // any holder of the bearer can read any correlation id. For
+    // Reuse the agent registry for poll auth. Polling is a strictly
+    // read-only capability the SDK needs after parking a tool call,
+    // so the same identity that issued the `/mcp` call is the natural
+    // caller — any registered agent's bearer can read any correlation
+    // id. Lite does not scope polls per-correlation-id; for
     // production per-agent isolation, ship to the full edition.
-    if let Some(expected) = &state.bearer_token {
+    if let Some(registry) = &state.agents {
         let supplied = headers
             .get("authorization")
             .and_then(|h| h.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "));
-        let ok = match supplied {
-            Some(s) => constant_time_eq(s.as_bytes(), expected.as_bytes()),
-            None => false,
-        };
+        let ok = supplied.is_some_and(|s| registry.lookup(s).is_some());
         if !ok {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -621,25 +728,30 @@ async fn handle_mcp(
 
     // Bearer auth (if configured). `Authorization: Bearer <token>` —
     // any other shape is 401. Compared in constant time so the
-    // matching-prefix length does not leak via response timing.
-    if let Some(expected) = &state.bearer_token {
-        let supplied = headers
-            .get("authorization")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
-        let ok = match supplied {
-            Some(s) => constant_time_eq(s.as_bytes(), expected.as_bytes()),
-            None => false,
-        };
-        if !ok {
-            return (
-                StatusCode::UNAUTHORIZED,
-                warden_headers(&correlation_id, state.mode, false, false),
-                "missing or invalid bearer token",
-            )
-                .into_response();
+    // matching-prefix length does not leak via response timing. In a
+    // multi-agent registry, the matched token also yields the
+    // `agent_id` we tag the request with.
+    let agent_id: String = match &state.agents {
+        Some(registry) => {
+            let supplied = headers
+                .get("authorization")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer "));
+            let matched = supplied.and_then(|s| registry.lookup(s));
+            match matched {
+                Some(id) => id.to_string(),
+                None => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        warden_headers(&correlation_id, state.mode, false, false),
+                        "missing or invalid bearer token",
+                    )
+                        .into_response();
+                }
+            }
         }
-    }
+        None => "anonymous".to_string(),
+    };
 
     // Parse + validate the request body. We use a permissive shape so
     // the proxy doesn't refuse otherwise-valid MCP variants we don't
@@ -676,18 +788,6 @@ async fn handle_mcp(
         .and_then(|p| p.get("name"))
         .and_then(|v| v.as_str())
         .unwrap_or(parsed.method.as_str())
-        .to_string();
-
-    // Agent-id source: bearer token if present, else "anonymous". The
-    // full edition trusts the mTLS CN; Lite has no PKI, so we just use
-    // the configured token as the rough identity. Good enough for
-    // developer-laptop use; reach for the full edition when you need
-    // real per-agent identity.
-    let agent_id = state
-        .bearer_token
-        .as_deref()
-        .map(|_| "bearer-agent")
-        .unwrap_or("anonymous")
         .to_string();
 
     let body_str = String::from_utf8_lossy(&body);
@@ -945,6 +1045,53 @@ mod tests {
         assert!(constant_time_eq(b"", b""));
     }
 
+    #[test]
+    fn agent_registry_single_round_trips() {
+        let r = AgentRegistry::single("tok-x".to_string());
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.lookup("tok-x"), Some("bearer-agent"));
+        assert_eq!(r.lookup("tok-y"), None);
+    }
+
+    #[test]
+    fn agent_registry_parses_multi() {
+        let r = AgentRegistry::parse("agent-a:tok-a, agent-b:tok-b").unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r.lookup("tok-a"), Some("agent-a"));
+        assert_eq!(r.lookup("tok-b"), Some("agent-b"));
+        assert_eq!(r.lookup("tok-c"), None);
+    }
+
+    #[test]
+    fn agent_registry_rejects_duplicate_tokens() {
+        let err = AgentRegistry::parse("agent-a:tok-x,agent-b:tok-x").unwrap_err();
+        assert!(err.contains("duplicate token"));
+    }
+
+    #[test]
+    fn agent_registry_rejects_missing_separator() {
+        let err = AgentRegistry::parse("agent-a-no-colon").unwrap_err();
+        assert!(err.contains("missing ':'"));
+    }
+
+    #[test]
+    fn agent_registry_rejects_empty_id_or_token() {
+        assert!(AgentRegistry::parse(":tok").is_err());
+        assert!(AgentRegistry::parse("agent:").is_err());
+    }
+
+    #[test]
+    fn agent_registry_rejects_bad_id_chars() {
+        let err = AgentRegistry::parse("agent.with.dots:tok").unwrap_err();
+        assert!(err.contains("[A-Za-z0-9_-]"));
+    }
+
+    #[test]
+    fn agent_registry_rejects_empty_spec() {
+        assert!(AgentRegistry::parse("").is_err());
+        assert!(AgentRegistry::parse("   , ,").is_err());
+    }
+
     #[tokio::test]
     async fn full_pipeline_constructible() {
         // Smoke test that AppState can be wired up. Doesn't issue a
@@ -957,7 +1104,7 @@ mod tests {
             ledger,
             upstream_url: "http://127.0.0.1:0/never-called".into(),
             http: reqwest::Client::new(),
-            bearer_token: None,
+            agents: None,
             decide_token: None,
             upstream_api_key: None,
             mode: WardenMode::Enforce,

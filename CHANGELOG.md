@@ -6,6 +6,45 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-12
+
+Multi-agent release. One warden-lite binary can now front N
+independent agents, each with its own bearer token and ledger
+identity — collapsing the v1 ergonomic gap where every partner with
+multiple agents had to run a warden-lite per agent.
+
+### Added
+
+- **Multi-agent registry.** `WARDEN_LITE_AGENTS=agent-a:tok-a,agent-b:tok-b`
+  (or `--agents`) registers N agents behind one binary. The token
+  that matched on inbound auth determines the `agent_id` written to
+  the ledger and surfaced to Rego policy as `input.agent_id`, so
+  policies can scope tool access per agent. Mutually exclusive with
+  the legacy single-token `WARDEN_LITE_TOKEN`; both set picks the
+  registry. Tokens must be unique across agents — duplicates fail
+  boot loudly.
+- **`AgentRegistry`** type exported from `warden_lite::proxy` for
+  embedders that want to wire their own state.
+- **9 new tests** (7 unit, 2 integration) covering registry parsing,
+  per-token agent_id routing on the ledger, and 401 rejection of
+  unknown tokens.
+
+### Changed
+
+- `AppState.bearer_token: Option<String>` is now
+  `AppState.agents: Option<AgentRegistry>`. The legacy
+  `WARDEN_LITE_TOKEN` env path builds a one-entry registry under the
+  hood so existing single-agent deployments keep their
+  `agent_id="bearer-agent"` ledger identity.
+
+### Migration notes
+
+- If you embed `warden-lite` as a library and construct `AppState`
+  directly, rename `bearer_token` → `agents` and wrap the value in
+  `AgentRegistry::single(token)` (or `AgentRegistry::parse(spec)?`
+  for the multi-agent form). The runtime / CLI surface is otherwise
+  unchanged.
+
 ## [0.4.1] - 2026-05-12
 
 Partner-day-1 hardening release. Closes the SQLite-concurrency gap
