@@ -225,6 +225,35 @@ impl Ledger {
         })
     }
 
+    /// Online backup of the live ledger to `dest_path` using SQLite's
+    /// online-backup API (`sqlite3_backup_*`). Safe to call against a
+    /// running proxy — the backup steps coexist with concurrent
+    /// writes; the destination ends up as a consistent point-in-time
+    /// snapshot.
+    ///
+    /// Returns the total page count copied. The destination is a
+    /// stand-alone SQLite DB ready to be opened with `Ledger::open`;
+    /// if the file exists at `dest_path` it is overwritten.
+    pub async fn backup_to(&self, dest_path: &str) -> rusqlite::Result<i32> {
+        // Overwrite any pre-existing file so a stale snapshot doesn't
+        // contaminate the new one. Backup::run_to_completion handles
+        // the chunking + busy retry loop internally.
+        let _ = std::fs::remove_file(dest_path);
+        let src = self.conn.lock().await;
+        let mut dst = Connection::open(dest_path)?;
+        let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
+        // 50-page chunks, 50ms sleep between busy retries. Returns
+        // `Ok(())` when the copy finishes; the page count is read off
+        // the progress handle.
+        backup.run_to_completion(
+            50,
+            std::time::Duration::from_millis(50),
+            None,
+        )?;
+        let pages = backup.progress().pagecount;
+        Ok(pages)
+    }
+
     /// Append one entry. Reads the latest seq + entry_hash, computes the
     /// new hash over the canonical body, inserts the row, returns the
     /// fully-populated entry. Same algorithm as
@@ -887,5 +916,58 @@ mod tests {
         let v = ledger.verify().await.unwrap();
         assert!(!v.valid);
         assert_eq!(v.first_invalid_seq, Some(2));
+    }
+
+    #[tokio::test]
+    async fn backup_to_produces_verifiable_snapshot() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_path = src_dir.path().join("ledger.db");
+        let src = Ledger::open(src_path.to_str().unwrap()).unwrap();
+        let mut originals = Vec::new();
+        for i in 0..5 {
+            originals.push(src.append(sample(&format!("agent-{}", i), true)).await.unwrap());
+        }
+
+        let dest_dir = tempfile::tempdir().unwrap();
+        let dest_path = dest_dir.path().join("snapshot.db");
+        let pages = src.backup_to(dest_path.to_str().unwrap()).await.unwrap();
+        assert!(pages > 0, "expected at least one page copied");
+
+        // Snapshot opens, verifies clean, and carries every entry the
+        // source had at the moment of the backup call.
+        let snapshot = Ledger::open(dest_path.to_str().unwrap()).unwrap();
+        let v = snapshot.verify().await.unwrap();
+        assert!(v.valid, "snapshot should verify");
+        assert_eq!(v.entries_checked, 5);
+        for orig in &originals {
+            let row = snapshot
+                .conn
+                .lock()
+                .await
+                .query_row(
+                    "SELECT entry_hash FROM entries WHERE seq = ?1",
+                    [orig.seq],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap();
+            assert_eq!(
+                row, orig.entry_hash,
+                "snapshot entry_hash diverges from source at seq={}",
+                orig.seq
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn backup_writes_overwrite_existing_dest() {
+        let src = Ledger::open(":memory:").unwrap();
+        src.append(sample("a", true)).await.unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let dest_path = dest_dir.path().join("snap.db");
+        // Pre-existing garbage file should be overwritten cleanly.
+        std::fs::write(&dest_path, b"junk").unwrap();
+        let _ = src.backup_to(dest_path.to_str().unwrap()).await.unwrap();
+        let snapshot = Ledger::open(dest_path.to_str().unwrap()).unwrap();
+        assert!(snapshot.verify().await.unwrap().valid);
     }
 }

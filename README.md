@@ -153,6 +153,8 @@ warden-lite start [--port N] [--upstream URL] [--policies DIR] [--ledger PATH]
                   [--upstream-timeout-secs SECS] [--slack-webhook-url URL]
 warden-lite verify [--ledger PATH]
 warden-lite audit  [--ledger PATH] <agent_id>
+warden-lite backup  [--ledger PATH] --output FILE
+warden-lite restore --input FILE [--ledger PATH] [--force]
 warden-lite pending list   [--endpoint URL] [--decide-token TOKEN]
                             [--status parked|decided|all] [--limit N]
                             [--sort oldest|newest] [--json]
@@ -206,6 +208,24 @@ denied," then flip `WARDEN_LITE_MODE=enforce` and pop the gate.
 ```bash
 warden-lite start --mode observe --upstream https://api.openai.com/v1
 ```
+
+## Backup + restore
+
+```bash
+# Snapshot the live ledger to a portable file. Safe to run against a
+# running warden-lite — uses SQLite's online-backup API.
+warden-lite backup --output snapshot.db
+
+# Restore from a snapshot. Verifies the snapshot's chain BEFORE
+# touching the target; refuses to overwrite an existing ledger
+# without --force. Recommended: stop warden-lite, restore, restart.
+warden-lite restore --input snapshot.db --force
+```
+
+The snapshot is a self-contained SQLite DB; `warden-lite verify
+--ledger snapshot.db` is a valid sanity check on its own. Schema
+migrations for older ledgers run on the first `Ledger::open`
+automatically — no manual SQL surgery needed.
 
 ## Wire format
 

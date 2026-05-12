@@ -146,6 +146,44 @@ enum Command {
         #[command(subcommand)]
         action: PendingAction,
     },
+
+    /// Snapshot the ledger DB to a portable file using SQLite's online-
+    /// backup API. Safe to run against a live warden-lite process; the
+    /// snapshot is a self-contained SQLite DB that opens with
+    /// `Ledger::open` and verifies clean with `warden-lite verify`.
+    /// The hash chain is re-verified after the copy completes.
+    Backup {
+        /// Source ledger path. Default `./warden-lite.db`. Env
+        /// `WARDEN_LITE_LEDGER`.
+        #[arg(long, env = "WARDEN_LITE_LEDGER")]
+        ledger: Option<String>,
+
+        /// Destination file. Overwritten if it already exists.
+        #[arg(long)]
+        output: PathBuf,
+    },
+
+    /// Restore the ledger from a snapshot file. Verifies the chain on
+    /// the snapshot BEFORE replacing the target (fail-closed: an
+    /// invalid snapshot never lands on disk). Refuses to overwrite an
+    /// existing ledger without `--force`. Recommended workflow: stop
+    /// the warden-lite process, restore, restart.
+    Restore {
+        /// Snapshot file produced by `warden-lite backup`.
+        #[arg(long)]
+        input: PathBuf,
+
+        /// Target ledger path. Default `./warden-lite.db`. Env
+        /// `WARDEN_LITE_LEDGER`.
+        #[arg(long, env = "WARDEN_LITE_LEDGER")]
+        ledger: Option<String>,
+
+        /// Overwrite an existing target ledger. Without this flag,
+        /// restoring onto a non-empty path errors out so an
+        /// accidental restore can't replace a live DB.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -276,6 +314,14 @@ async fn main() {
             run_audit(path, agent_id).await
         }
         Command::Pending { action } => run_pending(action).await,
+        Command::Backup { ledger, output } => {
+            let path = ledger.unwrap_or_else(|| "./warden-lite.db".into());
+            run_backup(path, output).await
+        }
+        Command::Restore { input, ledger, force } => {
+            let path = ledger.unwrap_or_else(|| "./warden-lite.db".into());
+            run_restore(input, path, force).await
+        }
     };
 
     std::process::exit(exit_code);
@@ -681,6 +727,179 @@ async fn run_start(cfg: StartConfig) -> i32 {
         }
     }
     0
+}
+
+async fn run_backup(ledger_path: String, output: PathBuf) -> i32 {
+    if !std::path::Path::new(&ledger_path).exists() {
+        eprintln!("error: source ledger {} does not exist", ledger_path);
+        return 1;
+    }
+    let ledger = match open_ledger(&ledger_path) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+    let output_str = match output.to_str() {
+        Some(s) => s.to_string(),
+        None => {
+            eprintln!("error: --output path is not valid UTF-8");
+            return 1;
+        }
+    };
+    let pages = match ledger.backup_to(&output_str).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: backup failed: {}", e);
+            // Clean up a partial snapshot — leaving it around is worse
+            // than nothing because verify would happily declare an
+            // empty file invalid.
+            let _ = std::fs::remove_file(&output_str);
+            return 1;
+        }
+    };
+
+    // Verify the snapshot itself. A backup that doesn't pass verify is
+    // not a backup. Open the snapshot fresh so we exercise the full
+    // open + schema-migration path the operator's restore would hit.
+    let snapshot = match Ledger::open(&output_str) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: snapshot opens but fails verify: {}", e);
+            return 2;
+        }
+    };
+    match snapshot.verify().await {
+        Ok(v) if v.valid => {
+            println!(
+                "snapshot {} OK — {} pages, {} entr{} verified",
+                output_str,
+                pages,
+                v.entries_checked,
+                if v.entries_checked == 1 { "y" } else { "ies" }
+            );
+            0
+        }
+        Ok(_) => {
+            eprintln!(
+                "error: snapshot {} fails chain verification — refusing to leave a known-bad backup on disk",
+                output_str
+            );
+            let _ = std::fs::remove_file(&output_str);
+            2
+        }
+        Err(e) => {
+            eprintln!("error: snapshot verify failed: {}", e);
+            1
+        }
+    }
+}
+
+async fn run_restore(input: PathBuf, ledger_path: String, force: bool) -> i32 {
+    if !input.exists() {
+        eprintln!("error: --input {} does not exist", input.display());
+        return 1;
+    }
+    let input_str = match input.to_str() {
+        Some(s) => s.to_string(),
+        None => {
+            eprintln!("error: --input path is not valid UTF-8");
+            return 1;
+        }
+    };
+
+    // Verify the snapshot's chain BEFORE touching the target. An
+    // invalid snapshot never lands on disk.
+    let snapshot = match Ledger::open(&input_str) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: snapshot {} won't open: {}", input_str, e);
+            return 1;
+        }
+    };
+    match snapshot.verify().await {
+        Ok(v) if v.valid => {}
+        Ok(_) => {
+            eprintln!(
+                "error: snapshot {} fails chain verification — refusing to restore",
+                input_str
+            );
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("error: snapshot verify failed: {}", e);
+            return 1;
+        }
+    }
+    drop(snapshot);
+
+    if std::path::Path::new(&ledger_path).exists() && !force {
+        eprintln!(
+            "error: target ledger {} already exists. Pass --force to overwrite (this is destructive)",
+            ledger_path
+        );
+        return 1;
+    }
+
+    // Atomic copy via std::fs::copy + rename onto target. Use a
+    // sibling-temp so partial writes on copy failure don't leave the
+    // target in a broken state.
+    let parent = std::path::Path::new(&ledger_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let tmp = parent.join(format!(
+        ".{}.restore-tmp",
+        std::path::Path::new(&ledger_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("warden-lite.db")
+    ));
+
+    if let Err(e) = std::fs::copy(&input_str, &tmp) {
+        eprintln!("error: copy {} -> {} failed: {}", input_str, tmp.display(), e);
+        let _ = std::fs::remove_file(&tmp);
+        return 1;
+    }
+    // Drop any stale WAL/SHM next to the target so SQLite doesn't
+    // replay a journal that belongs to the previous DB on next open.
+    let _ = std::fs::remove_file(format!("{}-wal", ledger_path));
+    let _ = std::fs::remove_file(format!("{}-shm", ledger_path));
+    if let Err(e) = std::fs::rename(&tmp, &ledger_path) {
+        eprintln!("error: rename tmp -> {} failed: {}", ledger_path, e);
+        let _ = std::fs::remove_file(&tmp);
+        return 1;
+    }
+
+    // Re-verify the live target so the operator gets a clear
+    // confirmation rather than just "no error".
+    let restored = match Ledger::open(&ledger_path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: target {} won't reopen post-restore: {}", ledger_path, e);
+            return 2;
+        }
+    };
+    match restored.verify().await {
+        Ok(v) if v.valid => {
+            println!(
+                "restored {} from {} — {} entr{} verified",
+                ledger_path,
+                input_str,
+                v.entries_checked,
+                if v.entries_checked == 1 { "y" } else { "ies" }
+            );
+            0
+        }
+        Ok(_) => {
+            eprintln!(
+                "error: post-restore verify failed on {} — restored bytes did not survive the rename",
+                ledger_path
+            );
+            2
+        }
+        Err(e) => {
+            eprintln!("error: post-restore verify errored: {}", e);
+            1
+        }
+    }
 }
 
 async fn run_verify(ledger_path: String) -> i32 {

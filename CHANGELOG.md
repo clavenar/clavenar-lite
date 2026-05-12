@@ -8,10 +8,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.5.0] - 2026-05-12
 
-Multi-agent release. One warden-lite binary can now front N
-independent agents, each with its own bearer token and ledger
-identity — collapsing the v1 ergonomic gap where every partner with
-multiple agents had to run a warden-lite per agent.
+Multi-agent release + operator-grade backup/restore. One warden-lite
+binary can now front N independent agents, and snapshotting the
+ledger no longer needs manual SQLite surgery.
 
 ### Added
 
@@ -25,9 +24,22 @@ multiple agents had to run a warden-lite per agent.
   boot loudly.
 - **`AgentRegistry`** type exported from `warden_lite::proxy` for
   embedders that want to wire their own state.
-- **9 new tests** (7 unit, 2 integration) covering registry parsing,
-  per-token agent_id routing on the ledger, and 401 rejection of
-  unknown tokens.
+- **`warden-lite backup --output FILE [--ledger PATH]`** — online
+  snapshot via SQLite's `sqlite3_backup_*` API. Safe to run against
+  a live process; the snapshot is a self-contained SQLite DB. Chain
+  is re-verified after the copy completes — an invalid snapshot is
+  never left on disk.
+- **`warden-lite restore --input FILE [--ledger PATH] [--force]`** —
+  restore from a snapshot. Verifies the snapshot's chain BEFORE
+  touching the target (fail-closed); copies via sibling-tmp +
+  atomic rename so a partial write can't corrupt the live DB;
+  drops stale WAL/SHM siblings; re-verifies the restored DB
+  post-rename. Refuses to overwrite an existing ledger without
+  `--force`.
+- **11 new tests** (9 unit, 2 integration) covering registry parsing,
+  per-token agent_id routing on the ledger, 401 rejection of
+  unknown tokens, snapshot byte-equivalence, and dest-file
+  overwrite handling.
 
 ### Changed
 
