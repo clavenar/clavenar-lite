@@ -201,9 +201,21 @@ enum PendingAction {
 async fn main() {
     // `RUST_LOG` env var controls level. Default to "info" if unset so
     // `warden-lite start` shows the boot banner without extra config.
+    // `WARDEN_LOG_FORMAT=json` switches to one structured event per
+    // line (current span fields + active span stack) — same env knob
+    // every other warden-* service exposes so one log-shipping config
+    // ingests any component.
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    match std::env::var("WARDEN_LOG_FORMAT").as_deref() {
+        Ok("json") => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .json()
+            .with_current_span(true)
+            .with_span_list(true)
+            .init(),
+        _ => tracing_subscriber::fmt().with_env_filter(filter).init(),
+    }
 
     let cli = Cli::parse();
     let exit_code = match cli.command {
