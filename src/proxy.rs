@@ -244,6 +244,13 @@ pub struct AppState {
     /// return path — operators decide via `warden-lite pending decide`
     /// or curl.
     pub slack_webhook_url: Option<String>,
+    /// Async-HIL callback URL allowlist. Each entry is a literal URL
+    /// prefix; an inbound `X-Warden-Callback-URL` header is accepted
+    /// only if it starts with one of these prefixes. Empty list (the
+    /// default) means callback URLs are rejected entirely — partners
+    /// must poll. The allowlist protects against agents using
+    /// warden-lite as a reflector to ping arbitrary internal URLs.
+    pub callback_allowlist: Vec<String>,
 }
 
 /// Wire shape for the `POST /mcp` request body. We accept any JSON
@@ -676,6 +683,35 @@ async fn handle_decide_pending(
         tracing::error!("decide-ledger append failed (decision still recorded): {}", e);
     }
 
+    // Async-HIL webhook: if the agent registered a callback URL at
+    // park time, fire-and-forget POST the decision. Spawn so the
+    // operator's HTTP response doesn't wait on a flaky partner
+    // endpoint — the pendings row is the durable source of truth and
+    // the partner can always fall back to polling.
+    if let Some(url) = decided.callback_url.clone() {
+        let http = state.http.clone();
+        let body_owned = (
+            decided.correlation_id.clone(),
+            decided.decision.clone().unwrap_or_default(),
+            decided.decider_note.clone(),
+            decided.decided_at.map(|t| t.to_rfc3339()),
+        );
+        tokio::spawn(async move {
+            let (corr, decision, note, ts) = &body_owned;
+            fire_callback(
+                http,
+                url,
+                CallbackBody {
+                    correlation_id: corr,
+                    decision,
+                    decider_note: note.as_deref(),
+                    decided_at: ts.clone(),
+                },
+            )
+            .await;
+        });
+    }
+
     (
         StatusCode::OK,
         warden_headers(&decide_corr, state.mode, false, false),
@@ -706,6 +742,92 @@ fn format_decide_reasoning(p: &Pending) -> String {
         reviews,
         note
     )
+}
+
+const CALLBACK_HEADER: &str = "X-Warden-Callback-URL";
+
+/// Validate the inbound `X-Warden-Callback-URL` header against the
+/// configured allowlist. Returns:
+///
+/// - `Ok(None)` if no header was supplied (the partner is on the
+///   polling path).
+/// - `Ok(Some(url))` if the header is present, syntactically a URL,
+///   and matches one of the configured allowlist prefixes.
+/// - `Err(reason)` for an empty allowlist + non-empty header, a
+///   malformed URL, or a URL outside the allowlist. The reason
+///   string is surfaced verbatim in the 400 response body so the
+///   partner can fix their config.
+fn validate_callback_url(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<Option<String>, String> {
+    let raw = match headers.get(CALLBACK_HEADER).and_then(|v| v.to_str().ok()) {
+        Some(s) if !s.is_empty() => s,
+        _ => return Ok(None),
+    };
+    if state.callback_allowlist.is_empty() {
+        return Err(format!(
+            "{} supplied but no allowlist is configured on this warden-lite; \
+             set WARDEN_LITE_CALLBACK_ALLOWLIST to enable async-HIL webhooks",
+            CALLBACK_HEADER
+        ));
+    }
+    if reqwest::Url::parse(raw).is_err() {
+        return Err(format!("{} is not a valid URL: {:?}", CALLBACK_HEADER, raw));
+    }
+    if !state
+        .callback_allowlist
+        .iter()
+        .any(|prefix| raw.starts_with(prefix.as_str()))
+    {
+        return Err(format!(
+            "{} {:?} is not on the configured allowlist",
+            CALLBACK_HEADER, raw
+        ));
+    }
+    Ok(Some(raw.to_string()))
+}
+
+/// Wire shape for the async-HIL callback POST body. Mirrors the GET
+/// /pending/{id} view but trimmed to the fields a partner needs to
+/// flip its in-memory pending registry on receipt.
+#[derive(Debug, Serialize)]
+struct CallbackBody<'a> {
+    correlation_id: &'a str,
+    decision: &'a str,
+    decider_note: Option<&'a str>,
+    decided_at: Option<String>,
+}
+
+/// Fire-and-forget POST of a decision to a partner's callback URL.
+/// Never blocks the operator's decide response — failures land in
+/// the trace log and the partner falls back to polling.
+async fn fire_callback(http: reqwest::Client, url: String, body: CallbackBody<'_>) {
+    let payload = match serde_json::to_vec(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("callback {}: serialize failed: {}", url, e);
+            return;
+        }
+    };
+    let res = http
+        .post(&url)
+        .header("content-type", "application/json")
+        .timeout(std::time::Duration::from_secs(5))
+        .body(payload)
+        .send()
+        .await;
+    match res {
+        Ok(r) if r.status().is_success() => {
+            tracing::info!("callback {}: delivered ({})", url, r.status());
+        }
+        Ok(r) => {
+            tracing::warn!("callback {}: returned non-2xx {}", url, r.status());
+        }
+        Err(e) => {
+            tracing::warn!("callback {}: send failed: {}", url, e);
+        }
+    }
 }
 
 /// Core request handler — security-first orchestration.
@@ -751,6 +873,23 @@ async fn handle_mcp(
             }
         }
         None => "anonymous".to_string(),
+    };
+
+    // Optional async-HIL callback URL. If the agent supplied a
+    // `X-Warden-Callback-URL` header, validate it against the
+    // configured allowlist BEFORE doing any pipeline work. Reject
+    // with 400 if the URL isn't on the allowlist — fail-loud so the
+    // partner can fix their config.
+    let callback_url: Option<String> = match validate_callback_url(&headers, &state) {
+        Ok(v) => v,
+        Err(reason) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                warden_headers(&correlation_id, state.mode, false, false),
+                reason,
+            )
+                .into_response();
+        }
     };
 
     // Parse + validate the request body. We use a permissive shape so
@@ -853,6 +992,7 @@ async fn handle_mcp(
             tool_type: tool_type.clone(),
             method: parsed.method.clone(),
             review_reasons: policy.review_reasons.clone(),
+            callback_url: callback_url.clone(),
         };
         let parked = match state.ledger.park_pending(park).await {
             Ok(p) => p,
@@ -1109,6 +1249,7 @@ mod tests {
             upstream_api_key: None,
             mode: WardenMode::Enforce,
             slack_webhook_url: None,
+            callback_allowlist: Vec::new(),
         });
     }
 }

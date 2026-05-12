@@ -36,6 +36,15 @@ ledger no longer needs manual SQLite surgery.
   drops stale WAL/SHM siblings; re-verifies the restored DB
   post-rename. Refuses to overwrite an existing ledger without
   `--force`.
+- **Async-HIL webhooks.** Agents can supply an
+  `X-Warden-Callback-URL` header on `/mcp` to opt out of polling.
+  On operator decide warden POSTs `{correlation_id, decision,
+  decider_note, decided_at}` to the URL fire-and-forget. URLs
+  must match an entry on the `WARDEN_LITE_CALLBACK_ALLOWLIST`
+  prefix list — unset means callbacks are rejected entirely.
+  Mirrors the v1 async-HIL contract the Python and TS SDKs
+  already speak via the polling path; the callback path is the
+  push variant.
 - **11 new tests** (9 unit, 2 integration) covering registry parsing,
   per-token agent_id routing on the ledger, 401 rejection of
   unknown tokens, snapshot byte-equivalence, and dest-file

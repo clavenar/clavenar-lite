@@ -138,6 +138,14 @@ pub struct Pending {
     /// `"allow"` or `"deny"` when set; `None` while awaiting decision.
     pub decision: Option<String>,
     pub decider_note: Option<String>,
+    /// Optional async-HIL callback. When set, the proxy fires a
+    /// fire-and-forget `POST {url}` with the decision body on
+    /// `decide_pending`, so the SDK doesn't have to poll. URLs are
+    /// supplied by the agent at park time via the
+    /// `X-Warden-Callback-URL` header and are validated against the
+    /// configured allowlist before being stored.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub callback_url: Option<String>,
 }
 
 /// Status filter for `Ledger::list_pendings`. `Parked` is the default
@@ -166,6 +174,9 @@ pub struct ParkRequest {
     pub tool_type: String,
     pub method: String,
     pub review_reasons: Vec<String>,
+    /// Validated callback URL for async-HIL webhooks. `None` means
+    /// the agent did not request a callback (polling path).
+    pub callback_url: Option<String>,
 }
 
 /// Failure modes for `Ledger::decide_pending`. Mapped 1:1 to HTTP
@@ -386,8 +397,8 @@ impl Ledger {
             .unwrap_or_else(|_| "[]".to_string());
         conn.execute(
             "INSERT INTO pendings (correlation_id, agent_id, tool_type, method,
-                                   review_reasons_json, requested_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                   review_reasons_json, requested_at, callback_url)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 req.correlation_id,
                 req.agent_id,
@@ -395,6 +406,7 @@ impl Ledger {
                 req.method,
                 review_reasons_json,
                 requested_at.to_rfc3339(),
+                req.callback_url,
             ],
         )?;
         Ok(Pending {
@@ -407,6 +419,7 @@ impl Ledger {
             decided_at: None,
             decision: None,
             decider_note: None,
+            callback_url: req.callback_url,
         })
     }
 
@@ -435,7 +448,7 @@ impl Ledger {
         let pending = {
             let mut stmt = conn.prepare(
                 "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
-                        requested_at, decided_at, decision, decider_note
+                        requested_at, decided_at, decision, decider_note, callback_url
                  FROM pendings WHERE correlation_id = ?1",
             )?;
             let mut rows = stmt.query([correlation_id])?;
@@ -498,7 +511,7 @@ impl Ledger {
         };
         let sql = format!(
             "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
-                    requested_at, decided_at, decision, decider_note
+                    requested_at, decided_at, decision, decider_note, callback_url
              FROM pendings {} ORDER BY requested_at {} LIMIT ?1",
             where_clause, order_dir
         );
@@ -514,7 +527,7 @@ impl Ledger {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
-                    requested_at, decided_at, decision, decider_note
+                    requested_at, decided_at, decision, decider_note, callback_url
              FROM pendings WHERE correlation_id = ?1",
         )?;
         let mut rows = stmt.query([correlation_id])?;
@@ -568,7 +581,8 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             requested_at TEXT NOT NULL,
             decided_at TEXT,
             decision TEXT,
-            decider_note TEXT
+            decider_note TEXT,
+            callback_url TEXT
          );
          CREATE INDEX IF NOT EXISTS idx_pendings_decided_at ON pendings(decided_at);",
     )?;
@@ -600,6 +614,22 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_entries_correlation_id ON entries(correlation_id)",
             [],
         )?;
+    }
+
+    // Pendings ALTER TABLE: callback_url is added for the async-HIL
+    // webhook flow (0.5.0). Legacy rows (no callback) read as None.
+    fn has_pending_column(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+        let mut stmt = conn.prepare("PRAGMA table_info(pendings)")?;
+        let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for n in names {
+            if n? == name {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    if !has_pending_column(conn, "callback_url")? {
+        conn.execute("ALTER TABLE pendings ADD COLUMN callback_url TEXT", [])?;
     }
     Ok(())
 }
@@ -649,6 +679,7 @@ fn row_to_pending(row: &rusqlite::Row) -> rusqlite::Result<Pending> {
     let decided_at_str: Option<String> = row.get(6)?;
     let decision: Option<String> = row.get(7)?;
     let decider_note: Option<String> = row.get(8)?;
+    let callback_url: Option<String> = row.get(9)?;
     let review_reasons: Vec<String> =
         serde_json::from_str(&review_reasons_json).unwrap_or_default();
     let requested_at = DateTime::parse_from_rfc3339(&requested_at_str)
@@ -679,6 +710,7 @@ fn row_to_pending(row: &rusqlite::Row) -> rusqlite::Result<Pending> {
         decided_at,
         decision,
         decider_note,
+        callback_url,
     })
 }
 
@@ -800,6 +832,7 @@ mod tests {
                 tool_type: "transfer_funds".to_string(),
                 method: "call_tool".to_string(),
                 review_reasons: vec!["Wire transfers require approval".to_string()],
+                callback_url: None,
             })
             .await
             .unwrap();
@@ -829,6 +862,7 @@ mod tests {
                 tool_type: "wire_transfer".to_string(),
                 method: "call_tool".to_string(),
                 review_reasons: vec!["Review: wire transfers".to_string()],
+                callback_url: None,
             })
             .await
             .unwrap();
