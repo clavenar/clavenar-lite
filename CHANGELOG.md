@@ -16,6 +16,14 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   STATUS column emits ANSI color on a TTY (yellow=parked, green=allow,
   red=deny) and stays plain text on pipes or when `NO_COLOR` is set
   (https://no-color.org).
+- **`scripts/smoke-e2e.sh`** — partner-day-1 quality gate. Boots
+  warden-lite from `:latest` on a dedicated docker network with a
+  Python upstream stub, then exercises all three verdicts, the
+  yellow-tier park-poll-decide loop, second-decide `409`, and the
+  decide-token gating (rejecting an agent bearer on the operator
+  endpoint). 17 checks against the live HTTP surface; cleans up on
+  exit. Companion to `smoke-install.sh` (artifacts exist) — this one
+  verifies they actually work.
 
 ## [0.4.0] - 2026-05-12
 
