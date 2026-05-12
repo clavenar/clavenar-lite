@@ -108,7 +108,7 @@ test_static_binary() {
         URL=\"https://github.com/vanteguardlabs/warden-lite/releases/download/v\${V}/warden-lite-\${V}-x86_64-linux-musl.tar.gz\"
         echo \"GET \$URL\"
         curl -fsSL \"\$URL\" | tar -xz
-        file ./warden-lite | grep -q 'statically linked' || {
+        file ./warden-lite | grep -Eq 'statically linked|static-pie linked' || {
             echo 'binary is NOT statically linked — musl build is broken'
             file ./warden-lite
             exit 1
