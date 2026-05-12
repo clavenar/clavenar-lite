@@ -11,6 +11,7 @@
 //! `README.md` for the full env-var matrix.
 
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -154,6 +155,11 @@ enum PendingAction {
         /// Max rows. Server caps at 500.
         #[arg(long, default_value_t = 50)]
         limit: u32,
+        /// Sort by `requested_at`: `oldest` (triage queue) or `newest`
+        /// (history). When unset, defaults to `oldest` for the
+        /// `parked` filter and `newest` for `decided`/`all`.
+        #[arg(long)]
+        sort: Option<String>,
         /// Print raw JSON instead of a table.
         #[arg(long)]
         json: bool,
@@ -259,8 +265,20 @@ async fn run_pending(action: PendingAction) -> i32 {
             decide_token,
             status,
             limit,
+            sort,
             json,
-        } => run_pending_list(&client, &endpoint, decide_token, &status, limit, json).await,
+        } => {
+            run_pending_list(
+                &client,
+                &endpoint,
+                decide_token,
+                &status,
+                limit,
+                sort.as_deref(),
+                json,
+            )
+            .await
+        }
         PendingAction::Get {
             id,
             endpoint,
@@ -294,14 +312,19 @@ async fn run_pending_list(
     decide_token: Option<String>,
     status: &str,
     limit: u32,
+    sort: Option<&str>,
     json: bool,
 ) -> i32 {
-    let url = format!(
+    let mut url = format!(
         "{}/pending?status={}&limit={}",
         endpoint.trim_end_matches('/'),
         status,
         limit
     );
+    if let Some(s) = sort {
+        url.push_str("&sort=");
+        url.push_str(s);
+    }
     let mut req = client.get(&url);
     if let Some(t) = &decide_token {
         req = req.bearer_auth(t);
@@ -338,15 +361,13 @@ async fn run_pending_list(
         println!("(no pendings matching status={})", status);
         return 0;
     }
-    // Strip the nanosecond tail from timestamps for display — we keep
-    // it in the DB for accurate ordering, but the screen-width budget
-    // wants seconds. The full timestamp is still in --json output.
     fn short_ts(t: &str) -> String {
         match t.find('.') {
             Some(i) => format!("{}Z", &t[..i]),
             None => t.to_string(),
         }
     }
+    let color = use_color();
     println!(
         "{:<38} {:<16} {:<16} {:<20} STATUS",
         "CORRELATION_ID", "AGENT_ID", "TOOL_TYPE", "REQUESTED_AT"
@@ -360,7 +381,7 @@ async fn run_pending_list(
             r["agent_id"].as_str().unwrap_or(""),
             r["tool_type"].as_str().unwrap_or(""),
             ts,
-            decision
+            colorize_status(decision, color)
         );
     }
     0
@@ -660,4 +681,29 @@ async fn run_audit(ledger_path: String, agent_id: String) -> i32 {
     }
     println!("\n{} entries for agent_id={}", entries.len(), agent_id);
     0
+}
+
+/// Whether `pending list` should emit ANSI colors. False if stdout
+/// isn't a TTY (pipe, redirect, CI logs) or if `NO_COLOR` is set —
+/// the no-color convention at https://no-color.org. Partner-facing
+/// CLI; we won't drag in `colored` or `termcolor` for one column's
+/// worth of formatting.
+fn use_color() -> bool {
+    std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+}
+
+/// Wrap the pending status in ANSI color codes when `color` is true.
+/// `parked` → yellow (waiting), `allow` → green, `deny` → red,
+/// anything else → unstyled.
+fn colorize_status(status: &str, color: bool) -> String {
+    if !color {
+        return status.to_string();
+    }
+    let code = match status {
+        "parked" => "\x1b[33m",
+        "allow" => "\x1b[32m",
+        "deny" => "\x1b[31m",
+        _ => return status.to_string(),
+    };
+    format!("{}{}\x1b[0m", code, status)
 }

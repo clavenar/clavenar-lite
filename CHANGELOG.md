@@ -4,6 +4,19 @@ All notable changes to `warden-lite` are documented here. Format based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`pending list` sort + color UX.** Triage-queue ergonomics: the
+  `parked` filter now defaults to **oldest-first** so the
+  longest-waiting request reads at the top; `decided` and `all`
+  default to newest-first (history view). Both can be overridden via
+  `?sort=oldest|newest` on the server and `--sort` on the CLI. The
+  STATUS column emits ANSI color on a TTY (yellow=parked, green=allow,
+  red=deny) and stays plain text on pipes or when `NO_COLOR` is set
+  (https://no-color.org).
+
 ## [0.4.0] - 2026-05-12
 
 Partner-readiness release. Closes the gap between "partner says yes"

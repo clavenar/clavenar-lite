@@ -150,6 +150,15 @@ pub enum PendingFilter {
     All,
 }
 
+/// Sort direction for `Ledger::list_pendings`. `Oldest` reads as a
+/// triage queue (longest-waiting first), `Newest` reads as a
+/// chronological history view (most recent first).
+#[derive(Debug, Clone, Copy)]
+pub enum PendingSort {
+    Oldest,
+    Newest,
+}
+
 #[derive(Debug, Clone)]
 pub struct ParkRequest {
     pub correlation_id: String,
@@ -430,14 +439,16 @@ impl Ledger {
         })
     }
 
-    /// List pending rows, newest-requested first, filtered by decision
-    /// state. `limit` caps the result set — partner-facing CLI defaults
-    /// to 50, server caps at 500 so a misconfigured client can't
-    /// exhaust memory ordering a million rows.
+    /// List pending rows filtered by decision state, ordered by
+    /// `requested_at` in the direction the caller asked for. `limit`
+    /// caps the result set — partner-facing CLI defaults to 50, server
+    /// caps at 500 so a misconfigured client can't exhaust memory
+    /// ordering a million rows.
     pub async fn list_pendings(
         &self,
         filter: PendingFilter,
         limit: u32,
+        sort: PendingSort,
     ) -> rusqlite::Result<Vec<Pending>> {
         let conn = self.conn.lock().await;
         let where_clause = match filter {
@@ -445,11 +456,15 @@ impl Ledger {
             PendingFilter::Decided => "WHERE decided_at IS NOT NULL",
             PendingFilter::All => "",
         };
+        let order_dir = match sort {
+            PendingSort::Oldest => "ASC",
+            PendingSort::Newest => "DESC",
+        };
         let sql = format!(
             "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
                     requested_at, decided_at, decision, decider_note
-             FROM pendings {} ORDER BY requested_at DESC LIMIT ?1",
-            where_clause
+             FROM pendings {} ORDER BY requested_at {} LIMIT ?1",
+            where_clause, order_dir
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([limit], row_to_pending)?;
