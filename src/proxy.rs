@@ -198,7 +198,14 @@ fn classify(brain: &HeuristicVerdict, policy: &PolicyDecision) -> Tier {
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
+        // `/` kept as an alias so the fly.toml health check (which
+        // targets `/`) continues to pass without a config rev.
+        // `/health` + `/readyz` match the cross-service convention
+        // every other warden-* service exposes — kubelet liveness
+        // probes target `/health`, readiness probes `/readyz`.
         .route("/", get(health))
+        .route("/health", get(health))
+        .route("/readyz", get(readyz))
         .route("/mcp", post(handle_mcp))
         .route("/pending", get(handle_list_pendings))
         .route("/pending/:id", get(handle_get_pending))
@@ -208,6 +215,32 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
 async fn health() -> &'static str {
     "Agent Warden Lite is active."
+}
+
+/// Readiness probe — returns 200 once the in-process ledger + policy
+/// engine are wired (i.e. always, after boot). Same wire shape as the
+/// full-stack services (`{status, checks}`) so a single Helm probe
+/// template parses any warden component. Lite has no external
+/// dependency to poll (SQLite is in-process; brain + policy live in
+/// the same binary), so the checks map is intentionally empty.
+async fn readyz() -> (axum::http::StatusCode, axum::Json<ReadinessResponse>) {
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(ReadinessResponse {
+            status: "ready",
+            checks: std::collections::BTreeMap::new(),
+        }),
+    )
+}
+
+/// Wire shape for `/readyz`. Mirrors the duplicate-on-purpose pattern
+/// in warden-brain, warden-policy-engine, warden-ledger, warden-hil,
+/// and warden-identity — keeping it inline avoids a shared crate for
+/// one tiny struct that almost never changes.
+#[derive(serde::Serialize)]
+struct ReadinessResponse {
+    status: &'static str,
+    checks: std::collections::BTreeMap<&'static str, &'static str>,
 }
 
 /// Decision payload posted by an operator (or by a Slack bot, or the
@@ -578,6 +611,8 @@ async fn handle_mcp(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    metrics::counter!("warden_lite_inspect_total").increment(1);
+
     // Mint the correlation id BEFORE any auth check so every response
     // — including 401s — carries a trace id. Partners filter the
     // ledger by this id from the X-Warden-Correlation-Id header on

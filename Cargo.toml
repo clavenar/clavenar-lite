@@ -47,6 +47,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 async-trait = "0.1"
+# Prometheus-format `/metrics` endpoint, same crate pair the full
+# edition (warden-proxy, warden-brain, warden-policy-engine,
+# warden-ledger, warden-hil, warden-identity) uses. Keeps scrape
+# tooling identical: one Prometheus + Grafana stack reads any
+# warden component.
+metrics = "0.22"
+metrics-exporter-prometheus = "0.14"
 
 [dev-dependencies]
 # Spawning a stub upstream from integration tests.

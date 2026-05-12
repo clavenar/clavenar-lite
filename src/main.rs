@@ -567,7 +567,35 @@ async fn run_start(cfg: StartConfig) -> i32 {
         slack_webhook_url: cfg.slack_webhook_url.clone(),
     });
 
-    let app = build_router(state);
+    // Install the Prometheus recorder once before any emit site fires.
+    // The handle lives in the `/metrics` closure below; metric facades
+    // (`metrics::counter!`, etc.) route to this global recorder
+    // transparently. Same pattern as warden-brain / warden-policy-
+    // engine / warden-ledger / warden-hil / warden-identity, so a
+    // single Prometheus scrape config reads any warden component.
+    let prom = match metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("error: failed to install prometheus recorder: {}", e);
+            return 1;
+        }
+    };
+    metrics::describe_counter!(
+        "warden_lite_inspect_total",
+        "Total /mcp requests received."
+    );
+    metrics::describe_counter!(
+        "warden_lite_verdicts_total",
+        "Terminal verdicts. verdict={allow,deny,pending,would_deny,would_pend}; the would_* family fires in observe mode."
+    );
+
+    let app = build_router(state).route(
+        "/metrics",
+        axum::routing::get(move || {
+            let prom = prom.clone();
+            async move { prom.render() }
+        }),
+    );
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
 
     tracing::info!(
