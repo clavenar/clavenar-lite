@@ -118,6 +118,15 @@ enum Command {
         /// `WARDEN_LITE_SLACK_WEBHOOK_URL`.
         #[arg(long, env = "WARDEN_LITE_SLACK_WEBHOOK_URL")]
         slack_webhook_url: Option<String>,
+
+        /// Async-HIL callback-URL allowlist. Comma-separated literal
+        /// URL prefixes; an inbound `X-Warden-Callback-URL` header is
+        /// accepted only if it starts with one of these. Unset (the
+        /// default) means callback URLs are rejected — partners poll.
+        /// e.g. `--callback-allowlist https://my-app.example.com/`.
+        /// Env `WARDEN_LITE_CALLBACK_ALLOWLIST`.
+        #[arg(long, env = "WARDEN_LITE_CALLBACK_ALLOWLIST")]
+        callback_allowlist: Option<String>,
     },
 
     /// Walk every entry in the ledger and confirm the hash chain is
@@ -280,6 +289,7 @@ async fn main() {
             upstream_timeout_secs,
             mode,
             slack_webhook_url,
+            callback_allowlist,
         } => {
             let port = port.unwrap_or(8088);
             let upstream = upstream.unwrap_or_else(|| "http://localhost:9000/mcp".into());
@@ -302,6 +312,7 @@ async fn main() {
                 upstream_timeout,
                 mode,
                 slack_webhook_url,
+                callback_allowlist,
             })
             .await
         }
@@ -579,6 +590,7 @@ struct StartConfig {
     upstream_timeout: Duration,
     mode: WardenMode,
     slack_webhook_url: Option<String>,
+    callback_allowlist: Option<String>,
 }
 
 /// Parse `--mode` / `WARDEN_LITE_MODE` into a {@link WardenMode}.
@@ -649,6 +661,37 @@ async fn run_start(cfg: StartConfig) -> i32 {
         (None, None) => None,
     };
 
+    // Async-HIL callback allowlist. Empty list means callback URLs
+    // are rejected at /mcp time — partners poll. We parse here so a
+    // bad config fails boot rather than at first /mcp.
+    let callback_allowlist: Vec<String> = match cfg.callback_allowlist.as_deref() {
+        Some(spec) => spec
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        None => Vec::new(),
+    };
+    if !callback_allowlist.is_empty() {
+        // Reject prefixes that aren't valid URLs at boot — otherwise the
+        // allowlist match would happily allow agents to point at
+        // garbage URLs we'd silently fail to POST to.
+        for prefix in &callback_allowlist {
+            if reqwest::Url::parse(prefix).is_err() {
+                eprintln!(
+                    "error: --callback-allowlist prefix {:?} is not a valid URL",
+                    prefix
+                );
+                return 1;
+            }
+        }
+        tracing::info!(
+            allowlist_count = callback_allowlist.len(),
+            "async-HIL callbacks enabled"
+        );
+    }
+
     let state = Arc::new(AppState {
         policy,
         ledger,
@@ -659,6 +702,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
         upstream_api_key: cfg.upstream_api_key,
         mode: cfg.mode,
         slack_webhook_url: cfg.slack_webhook_url.clone(),
+        callback_allowlist,
     });
 
     // Install the Prometheus recorder once before any emit site fires.

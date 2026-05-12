@@ -116,6 +116,7 @@ async fn spawn_lite_with_slack(
         upstream_api_key: None,
         mode,
         slack_webhook_url,
+        callback_allowlist: Vec::new(),
     });
     let app = build_router(state);
 
@@ -1256,6 +1257,7 @@ async fn spawn_lite_with_registry(
         upstream_api_key: None,
         mode: WardenMode::Enforce,
         slack_webhook_url: None,
+        callback_allowlist: Vec::new(),
     });
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1321,4 +1323,155 @@ async fn multi_agent_rejects_unknown_token() {
     assert_eq!(resp.status().as_u16(), 401);
     // Ledger should have no entries — auth fires before any pipeline work.
     assert!(ledger.entries_for_agent("agent-a").await.unwrap().is_empty());
+}
+
+// ---- Async-HIL callback URL --------------------------------------------------
+
+async fn spawn_lite_with_callbacks(
+    upstream_url: String,
+    allowlist: Vec<String>,
+) -> (SocketAddr, Arc<Ledger>) {
+    let policy = Arc::new(PolicyEngine::from_dir(&policies_dir(), 60).unwrap());
+    let ledger = Arc::new(Ledger::open(":memory:").unwrap());
+    let state = Arc::new(AppState {
+        policy: policy.clone(),
+        ledger: ledger.clone(),
+        upstream_url,
+        http: reqwest::Client::new(),
+        agents: None,
+        decide_token: None,
+        upstream_api_key: None,
+        mode: WardenMode::Enforce,
+        slack_webhook_url: None,
+        callback_allowlist: allowlist,
+    });
+    let app = build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, ledger)
+}
+
+/// Spawn a stub HTTP server that captures every POST body it receives.
+/// Returns the listener address and a shared buffer the test can read.
+async fn spawn_callback_sink() -> (SocketAddr, Arc<Mutex<Vec<serde_json::Value>>>) {
+    let captured: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_handler = captured.clone();
+    async fn capture(
+        State(buf): State<Arc<Mutex<Vec<serde_json::Value>>>>,
+        body: axum::body::Bytes,
+    ) -> axum::http::StatusCode {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
+            buf.lock().unwrap().push(v);
+        }
+        axum::http::StatusCode::OK
+    }
+    let app = Router::new()
+        .route("/callback", post(capture))
+        .with_state(captured_for_handler);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, captured)
+}
+
+#[tokio::test]
+async fn callback_url_rejected_when_no_allowlist_configured() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) =
+        spawn_lite_with_callbacks(format!("http://{}/mcp", upstream), Vec::new()).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/mcp", lite_addr))
+        .header("X-Warden-Callback-URL", "https://x.example.com/cb")
+        .json(&serde_json::json!({
+            "method": "call_tool",
+            "params": { "name": "ping" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("allowlist"), "expected allowlist hint, got {body}");
+}
+
+#[tokio::test]
+async fn callback_url_rejected_when_off_allowlist() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) = spawn_lite_with_callbacks(
+        format!("http://{}/mcp", upstream),
+        vec!["https://good.example.com/".to_string()],
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/mcp", lite_addr))
+        .header("X-Warden-Callback-URL", "https://evil.example.com/cb")
+        .json(&serde_json::json!({
+            "method": "call_tool",
+            "params": { "name": "ping" }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 400);
+}
+
+#[tokio::test]
+async fn callback_url_fires_on_decide() {
+    let upstream = spawn_stub_upstream().await;
+    let (cb_addr, captured) = spawn_callback_sink().await;
+    let cb_url = format!("http://{}/callback", cb_addr);
+    let (lite_addr, _ledger) = spawn_lite_with_callbacks(
+        format!("http://{}/mcp", upstream),
+        vec![format!("http://{}/", cb_addr)],
+    )
+    .await;
+
+    // Park a wire_transfer (Yellow tier) with a callback URL.
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/mcp", lite_addr))
+        .header("X-Warden-Callback-URL", &cb_url)
+        .json(&serde_json::json!({
+            "method": "call_tool",
+            "params": {
+                "name": "wire_transfer",
+                "arguments": { "to": "acct-1", "amount": 100 }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 202);
+    let parked_body: serde_json::Value = resp.json().await.unwrap();
+    let corr = parked_body["correlation_id"].as_str().unwrap().to_string();
+
+    // Operator approves the pending — this should fire-and-forget POST
+    // the decision to the callback URL.
+    let decide = reqwest::Client::new()
+        .post(format!("http://{}/pending/{}/decide", lite_addr, corr))
+        .json(&serde_json::json!({ "decision": "allow", "note": "approved" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(decide.status().as_u16(), 200);
+
+    // Give the spawned webhook time to land — fire-and-forget.
+    for _ in 0..50 {
+        if !captured.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let bodies = captured.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 1, "expected exactly one callback delivery");
+    let body = &bodies[0];
+    assert_eq!(body["correlation_id"], serde_json::Value::String(corr));
+    assert_eq!(body["decision"], serde_json::Value::String("allow".into()));
+    assert_eq!(body["decider_note"], serde_json::Value::String("approved".into()));
 }

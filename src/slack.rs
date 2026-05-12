@@ -88,6 +88,7 @@ mod tests {
             decided_at: None,
             decision: None,
             decider_note: None,
+            callback_url: None,
         }
     }
 

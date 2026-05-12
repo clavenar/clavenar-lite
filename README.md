@@ -138,6 +138,15 @@ For real traffic, layer these on top of the default deploy:
   can scope tool access per agent. Mutually exclusive with the
   single-agent `WARDEN_LITE_TOKEN`; both being set picks the
   registry. Tokens must be unique across agents.
+- **Async-HIL webhooks.** Set
+  `WARDEN_LITE_CALLBACK_ALLOWLIST=https://my-app.example.com/`
+  (comma-separated prefixes) to enable agent-supplied callback
+  URLs. Agents send `X-Warden-Callback-URL: <url>` on `/mcp`; on
+  operator decide warden POSTs `{correlation_id, decision,
+  decider_note, decided_at}` to that URL fire-and-forget. URLs
+  outside the allowlist are rejected with 400. Unset (the default)
+  rejects callbacks entirely — partners poll
+  `GET /pending/{id}`.
 - **Upstream creds.** `WARDEN_LITE_UPSTREAM_API_KEY` injects the key
   into forwarded requests so your agent never sees it. Same shape
   as the full edition's Vault injection, minus Vault.
@@ -151,6 +160,7 @@ warden-lite start [--port N] [--upstream URL] [--policies DIR] [--ledger PATH]
                   [--velocity-window SECS] [--token TOKEN] [--agents SPEC]
                   [--decide-token TOKEN] [--upstream-api-key KEY]
                   [--upstream-timeout-secs SECS] [--slack-webhook-url URL]
+                  [--callback-allowlist PREFIXES]
 warden-lite verify [--ledger PATH]
 warden-lite audit  [--ledger PATH] <agent_id>
 warden-lite backup  [--ledger PATH] --output FILE
@@ -178,6 +188,7 @@ Every flag falls back to a `WARDEN_LITE_*` env var:
 | `--velocity-window`        | `WARDEN_LITE_VELOCITY_WINDOW_SECS`   | 60                        |
 | `--token`                  | `WARDEN_LITE_TOKEN`                  | (none — open access)      |
 | `--agents`                 | `WARDEN_LITE_AGENTS`                 | (none — single-agent)     |
+| `--callback-allowlist`     | `WARDEN_LITE_CALLBACK_ALLOWLIST`     | (none — callbacks off)    |
 | `--upstream-api-key`       | `WARDEN_LITE_UPSTREAM_API_KEY`       | (none — pass-through)     |
 | `--upstream-timeout-secs`  | `WARDEN_LITE_UPSTREAM_TIMEOUT_SECS`  | 120                       |
 | `--mode`                   | `WARDEN_LITE_MODE`                   | `enforce`                 |
