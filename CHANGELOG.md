@@ -6,6 +6,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-05-12
+
+Partner-day-1 hardening release. Closes the SQLite-concurrency gap
+that hung the `warden-lite audit` CLI against a running proxy,
+sharpens the operator triage queue, and wires the end-to-end smoke
+into CI so future changes can't silently break the day-1 surface.
+
 ### Changed
 
 - **SQLite WAL + busy_timeout** on ledger open. Lets the
@@ -26,13 +33,14 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   red=deny) and stays plain text on pipes or when `NO_COLOR` is set
   (https://no-color.org).
 - **`scripts/smoke-e2e.sh`** — partner-day-1 quality gate. Boots
-  warden-lite from `:latest` on a dedicated docker network with a
-  Python upstream stub, then exercises all three verdicts, the
-  yellow-tier park-poll-decide loop, second-decide `409`, and the
-  decide-token gating (rejecting an agent bearer on the operator
-  endpoint), and a concurrent `warden-lite audit` CLI read against the
-  same DB file (proves WAL works). 20 checks against the live HTTP
-  surface; cleans up on exit. Companion to `smoke-install.sh` — this one
+  warden-lite from a freshly-built local image on a dedicated docker
+  network with a Python upstream stub, then exercises all three
+  verdicts, the yellow-tier park-poll-decide loop, second-decide
+  `409`, the decide-token gating (rejecting an agent bearer on the
+  operator endpoint), and a concurrent `warden-lite audit` CLI read
+  against the same DB file (proves WAL works). 20 checks against
+  the live HTTP surface; cleans up on exit. Wired into CI so every
+  push proves the gate. Companion to `smoke-install.sh` — this one
   verifies they actually work.
 
 ## [0.4.0] - 2026-05-12
@@ -162,6 +170,7 @@ with the embedded heuristic Brain, `regorus`-backed Rego policy
 engine, SHA-256 hash-chained SQLite ledger, and axum proxy. Wire
 format and chain shape are byte-compatible with the full edition.
 
+[0.4.1]: https://github.com/vanteguardlabs/warden-lite/releases/tag/v0.4.1
 [0.4.0]: https://github.com/vanteguardlabs/warden-lite/releases/tag/v0.4.0
 [0.3.0]: https://github.com/vanteguardlabs/warden-lite/releases/tag/v0.3.0
 [0.2.0]: https://github.com/vanteguardlabs/warden-lite/releases/tag/v0.2.0
