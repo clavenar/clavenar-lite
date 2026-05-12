@@ -55,6 +55,7 @@ use crate::ledger::{
     DecideError, Ledger, LogRequest, ParkRequest, Pending, PendingFilter, PendingSort,
 };
 use crate::policy::{AgentHistory, PolicyDecision, PolicyEngine, PolicyInput};
+use crate::webhook::{self, WebhookEvent};
 
 const CORRELATION_HEADER: &str = "X-Warden-Correlation-Id";
 
@@ -251,6 +252,14 @@ pub struct AppState {
     /// must poll. The allowlist protects against agents using
     /// warden-lite as a reflector to ping arbitrary internal URLs.
     pub callback_allowlist: Vec<String>,
+    /// Optional outbound verdict-webhook URL. When set, every terminal
+    /// pipeline outcome (allow / deny / park, plus the `would_*`
+    /// variants in observe mode) and every operator decide fires a
+    /// fire-and-forget POST of a stable JSON event shape. See
+    /// [`crate::webhook::WebhookEvent`]. Independent of
+    /// `slack_webhook_url` — Slack is Markdown for humans; this is
+    /// JSON for SIEMs.
+    pub webhook_url: Option<String>,
 }
 
 /// Wire shape for the `POST /mcp` request body. We accept any JSON
@@ -683,6 +692,34 @@ async fn handle_decide_pending(
         tracing::error!("decide-ledger append failed (decision still recorded): {}", e);
     }
 
+    // Outbound SIEM webhook: fire one `decide_allow` or `decide_deny`
+    // event per resolution so partners can correlate the operator
+    // decision back to the original park event. Reuses
+    // `format_decide_reasoning` so the reasoning string is identical
+    // to what hit the ledger — partners can grep both surfaces with
+    // the same query.
+    let decide_event = if decided.decision.as_deref() == Some("allow") {
+        webhook::EVENT_DECIDE_ALLOW
+    } else {
+        webhook::EVENT_DECIDE_DENY
+    };
+    let decide_reasoning = format_decide_reasoning(&decided);
+    maybe_fire_webhook(
+        &state,
+        WebhookEvent {
+            event: decide_event,
+            correlation_id: &decided.correlation_id,
+            agent_id: &decided.agent_id,
+            tool_type: &decided.tool_type,
+            method: &decided.method,
+            intent_category: "OperatorDecide",
+            reasoning: &decide_reasoning,
+            review_reasons: &decided.review_reasons,
+            mode: state.mode.as_str(),
+            ts: webhook::now_rfc3339(),
+        },
+    );
+
     // Async-HIL webhook: if the agent registered a callback URL at
     // park time, fire-and-forget POST the decision. Spawn so the
     // operator's HTTP response doesn't wait on a flaky partner
@@ -797,6 +834,29 @@ struct CallbackBody<'a> {
     decision: &'a str,
     decider_note: Option<&'a str>,
     decided_at: Option<String>,
+}
+
+/// Spawn an outbound verdict webhook if `webhook_url` is configured.
+/// No-op when unset — the call site stays one-liner whether or not a
+/// partner has wired up an SIEM. Serialization happens on the calling
+/// task so the spawned future owns a plain `serde_json::Value`; the
+/// HTTP send + retry-free fire-and-forget happens in the spawned task.
+fn maybe_fire_webhook(state: &AppState, event: WebhookEvent<'_>) {
+    let Some(url) = state.webhook_url.as_deref() else {
+        return;
+    };
+    let body = match serde_json::to_value(&event) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("webhook serialize failed: {}", e);
+            return;
+        }
+    };
+    let http = state.http.clone();
+    let url = url.to_string();
+    tokio::spawn(async move {
+        webhook::fire_event(http, url, body).await;
+    });
 }
 
 /// Fire-and-forget POST of a decision to a partner's callback URL.
@@ -1022,6 +1082,22 @@ async fn handle_mcp(
             });
         }
 
+        maybe_fire_webhook(
+            &state,
+            WebhookEvent {
+                event: webhook::EVENT_PARK,
+                correlation_id: &correlation_id,
+                agent_id: &agent_id,
+                tool_type: &tool_type,
+                method: &parsed.method,
+                intent_category: "PendingReview",
+                reasoning: &combined_reasoning,
+                review_reasons: &policy.review_reasons,
+                mode: state.mode.as_str(),
+                ts: webhook::now_rfc3339(),
+            },
+        );
+
         let resp = PendingResponse {
             status: "pending",
             correlation_id: correlation_id.clone(),
@@ -1044,6 +1120,21 @@ async fn handle_mcp(
         if !brain.authorized {
             reasons.push(brain.reasoning.clone());
         }
+        maybe_fire_webhook(
+            &state,
+            WebhookEvent {
+                event: webhook::EVENT_DENY,
+                correlation_id: &correlation_id,
+                agent_id: &agent_id,
+                tool_type: &tool_type,
+                method: &parsed.method,
+                intent_category: &brain.intent_category,
+                reasoning: &combined_reasoning,
+                review_reasons: &policy.review_reasons,
+                mode: state.mode.as_str(),
+                ts: webhook::now_rfc3339(),
+            },
+        );
         let resp = DenyResponse {
             error: "security_violation",
             reasons,
@@ -1102,6 +1193,31 @@ async fn handle_mcp(
     // numeric status; the body rides through as `Bytes`.
     let out_status = StatusCode::from_u16(status.as_u16())
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    // Webhook emission: `would_deny` / `would_park` only fire in
+    // observe mode (the enforce branches already short-circuited and
+    // emitted their own event). In enforce + Green we fire `allow`.
+    let event = if would_deny {
+        webhook::EVENT_WOULD_DENY
+    } else if would_pend {
+        webhook::EVENT_WOULD_PARK
+    } else {
+        webhook::EVENT_ALLOW
+    };
+    maybe_fire_webhook(
+        &state,
+        WebhookEvent {
+            event,
+            correlation_id: &correlation_id,
+            agent_id: &agent_id,
+            tool_type: &tool_type,
+            method: &parsed.method,
+            intent_category: &brain.intent_category,
+            reasoning: &combined_reasoning,
+            review_reasons: &policy.review_reasons,
+            mode: state.mode.as_str(),
+            ts: webhook::now_rfc3339(),
+        },
+    );
     (
         out_status,
         warden_headers(&correlation_id, state.mode, would_deny, would_pend),
@@ -1250,6 +1366,7 @@ mod tests {
             mode: WardenMode::Enforce,
             slack_webhook_url: None,
             callback_allowlist: Vec::new(),
+            webhook_url: None,
         });
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "warden-lite"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 description = "Community Edition of Agent Warden — single-binary OSS proxy with embedded heuristic Brain, Rego policy engine, and SHA-256 hash-chained ledger."
 license = "Apache-2.0"

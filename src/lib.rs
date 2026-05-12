@@ -8,6 +8,7 @@
 //! * [`ledger`]     — embedded SHA-256 hash-chained SQLite ledger (Layer 4).
 //! * [`proxy`]      — embedded HTTP proxy + orchestrator (Layer 1).
 //! * [`slack`]      — optional Slack-webhook side-channel for park alerts.
+//! * [`webhook`]    — optional outbound JSON webhook for SIEM / Datadog ingest.
 //!
 //! See `README.md` for what Lite does versus the full Agent Warden
 //! edition. The short version: Lite is a single binary for developer-
@@ -19,3 +20,4 @@ pub mod ledger;
 pub mod policy;
 pub mod proxy;
 pub mod slack;
+pub mod webhook;
