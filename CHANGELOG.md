@@ -6,6 +6,33 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-12
+
+Outbound verdict webhook release. Pairs warden-lite's audit ledger
+with a fire-and-forget JSON stream so SIEMs, Datadog HTTP ingest, and
+generic webhook receivers can index every pipeline outcome without
+polling the ledger.
+
+### Added
+
+- **`--webhook-url` / `WARDEN_LITE_WEBHOOK_URL`** — outbound
+  verdict webhook. Posts one stable-shape JSON event per terminal
+  outcome on `/mcp` (`allow` / `deny` / `park`, plus `would_deny` /
+  `would_park` in observe mode) and one per operator decide
+  (`decide_allow` / `decide_deny`). Body:
+  `{event, correlation_id, agent_id, tool_type, method,
+  intent_category, reasoning, review_reasons, mode, ts}` with RFC
+  3339 millis UTC. 5s per-request timeout; failures land at `warn`
+  level and never delay the agent or operator response. Distinct
+  from `--slack-webhook-url` — Slack ships Markdown for humans,
+  this ships JSON for machines. URL is validated at boot so a typo
+  fails fast.
+- **4 new integration tests** covering allow / deny / park-then-decide
+  flow and observe-mode `would_deny` emission against a stub sink.
+- **3 new unit tests** in `webhook.rs` pinning the wire-shape key
+  set, RFC 3339 `Z`-suffix timestamps, and event-constant strings
+  (renaming any of them is a breaking SIEM contract change).
+
 ## [0.5.0] - 2026-05-12
 
 Multi-agent release + operator-grade backup/restore. One warden-lite

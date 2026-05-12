@@ -127,6 +127,16 @@ enum Command {
         /// Env `WARDEN_LITE_CALLBACK_ALLOWLIST`.
         #[arg(long, env = "WARDEN_LITE_CALLBACK_ALLOWLIST")]
         callback_allowlist: Option<String>,
+
+        /// Outbound verdict-webhook URL. When set, every terminal
+        /// pipeline outcome (allow / deny / park; would_deny /
+        /// would_park in observe mode) and every operator decide
+        /// fires a fire-and-forget POST with a stable JSON event
+        /// shape. Intended for SIEM / Datadog HTTP / generic webhook
+        /// ingest — distinct from `--slack-webhook-url` (Markdown for
+        /// humans). Env `WARDEN_LITE_WEBHOOK_URL`.
+        #[arg(long, env = "WARDEN_LITE_WEBHOOK_URL")]
+        webhook_url: Option<String>,
     },
 
     /// Walk every entry in the ledger and confirm the hash chain is
@@ -290,6 +300,7 @@ async fn main() {
             mode,
             slack_webhook_url,
             callback_allowlist,
+            webhook_url,
         } => {
             let port = port.unwrap_or(8088);
             let upstream = upstream.unwrap_or_else(|| "http://localhost:9000/mcp".into());
@@ -313,6 +324,7 @@ async fn main() {
                 mode,
                 slack_webhook_url,
                 callback_allowlist,
+                webhook_url,
             })
             .await
         }
@@ -591,6 +603,7 @@ struct StartConfig {
     mode: WardenMode,
     slack_webhook_url: Option<String>,
     callback_allowlist: Option<String>,
+    webhook_url: Option<String>,
 }
 
 /// Parse `--mode` / `WARDEN_LITE_MODE` into a {@link WardenMode}.
@@ -692,6 +705,15 @@ async fn run_start(cfg: StartConfig) -> i32 {
         );
     }
 
+    // Validate the outbound webhook URL at boot so a typo surfaces
+    // here rather than as a silent `warn` log on the first verdict.
+    if let Some(u) = &cfg.webhook_url
+        && reqwest::Url::parse(u).is_err()
+    {
+        eprintln!("error: --webhook-url is not a valid URL: {:?}", u);
+        return 1;
+    }
+
     let state = Arc::new(AppState {
         policy,
         ledger,
@@ -703,6 +725,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
         mode: cfg.mode,
         slack_webhook_url: cfg.slack_webhook_url.clone(),
         callback_allowlist,
+        webhook_url: cfg.webhook_url.clone(),
     });
 
     // Install the Prometheus recorder once before any emit site fires.
@@ -737,7 +760,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
 
     tracing::info!(
-        "warden-lite listening on http://{} (mode={}, upstream={}, policies={}, ledger={}, auth={}, decide_auth={}, slack_alerts={}, upstream_timeout={}s)",
+        "warden-lite listening on http://{} (mode={}, upstream={}, policies={}, ledger={}, auth={}, decide_auth={}, slack_alerts={}, verdict_webhook={}, upstream_timeout={}s)",
         addr,
         match cfg.mode { WardenMode::Enforce => "enforce", WardenMode::Observe => "observe" },
         cfg.upstream,
@@ -746,6 +769,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
         if cfg.token.is_some() { "bearer-token" } else { "open" },
         if cfg.decide_token.is_some() { "bearer-token" } else { "open" },
         if cfg.slack_webhook_url.is_some() { "enabled" } else { "off" },
+        if cfg.webhook_url.is_some() { "enabled" } else { "off" },
         cfg.upstream_timeout.as_secs(),
     );
 

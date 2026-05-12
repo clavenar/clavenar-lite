@@ -147,6 +147,18 @@ For real traffic, layer these on top of the default deploy:
   outside the allowlist are rejected with 400. Unset (the default)
   rejects callbacks entirely — partners poll
   `GET /pending/{id}`.
+- **Outbound verdict webhooks.** Set
+  `WARDEN_LITE_WEBHOOK_URL=https://siem.example.com/ingest` to
+  fire-and-forget a structured JSON event on every terminal
+  pipeline outcome (`allow` / `deny` / `park`, plus `would_deny` /
+  `would_park` in observe mode) and on every operator decide
+  (`decide_allow` / `decide_deny`). Distinct from Slack — the
+  payload is machine-readable JSON for SIEM / Datadog HTTP ingest.
+  Each POST carries `{event, correlation_id, agent_id, tool_type,
+  method, intent_category, reasoning, review_reasons, mode, ts}`
+  with a 5s per-request timeout; failures land at `warn` and never
+  delay the agent or operator response. The ledger remains the
+  durable source of truth.
 - **Upstream creds.** `WARDEN_LITE_UPSTREAM_API_KEY` injects the key
   into forwarded requests so your agent never sees it. Same shape
   as the full edition's Vault injection, minus Vault.
@@ -160,7 +172,7 @@ warden-lite start [--port N] [--upstream URL] [--policies DIR] [--ledger PATH]
                   [--velocity-window SECS] [--token TOKEN] [--agents SPEC]
                   [--decide-token TOKEN] [--upstream-api-key KEY]
                   [--upstream-timeout-secs SECS] [--slack-webhook-url URL]
-                  [--callback-allowlist PREFIXES]
+                  [--callback-allowlist PREFIXES] [--webhook-url URL]
 warden-lite verify [--ledger PATH]
 warden-lite audit  [--ledger PATH] <agent_id>
 warden-lite backup  [--ledger PATH] --output FILE
@@ -194,6 +206,7 @@ Every flag falls back to a `WARDEN_LITE_*` env var:
 | `--mode`                   | `WARDEN_LITE_MODE`                   | `enforce`                 |
 | `--decide-token`           | `WARDEN_LITE_DECIDE_TOKEN`           | (none — open access)      |
 | `--slack-webhook-url`      | `WARDEN_LITE_SLACK_WEBHOOK_URL`      | (none — alerts off)       |
+| `--webhook-url`            | `WARDEN_LITE_WEBHOOK_URL`            | (none — webhook off)      |
 
 The upstream URL is parsed at startup and a typo fails fast with exit
 code `1` rather than 502-ing the first request through.
