@@ -18,7 +18,7 @@ use std::time::Duration;
 use axum::{extract::State, routing::post, Router};
 use warden_lite::ledger::Ledger;
 use warden_lite::policy::PolicyEngine;
-use warden_lite::proxy::{build_router, AppState, WardenMode};
+use warden_lite::proxy::{build_router, AgentRegistry, AppState, WardenMode};
 
 fn policies_dir() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -105,12 +105,13 @@ async fn spawn_lite_with_slack(
 ) -> (SocketAddr, Arc<Ledger>) {
     let policy = Arc::new(PolicyEngine::from_dir(&policies_dir(), 60).unwrap());
     let ledger = Arc::new(Ledger::open(":memory:").unwrap());
+    let agents = bearer_token.map(AgentRegistry::single);
     let state = Arc::new(AppState {
         policy: policy.clone(),
         ledger: ledger.clone(),
         upstream_url,
         http: reqwest::Client::new(),
-        bearer_token,
+        agents,
         decide_token,
         upstream_api_key: None,
         mode,
@@ -1235,4 +1236,89 @@ async fn slack_webhook_failure_does_not_break_park() {
     assert_eq!(resp.status().as_u16(), 202);
     // Give the failed-spawn time to settle so any panic surfaces here.
     tokio::time::sleep(Duration::from_millis(120)).await;
+}
+
+// ---- Multi-agent registry --------------------------------------------------
+
+async fn spawn_lite_with_registry(
+    upstream_url: String,
+    registry: AgentRegistry,
+) -> (SocketAddr, Arc<Ledger>) {
+    let policy = Arc::new(PolicyEngine::from_dir(&policies_dir(), 60).unwrap());
+    let ledger = Arc::new(Ledger::open(":memory:").unwrap());
+    let state = Arc::new(AppState {
+        policy: policy.clone(),
+        ledger: ledger.clone(),
+        upstream_url,
+        http: reqwest::Client::new(),
+        agents: Some(registry),
+        decide_token: None,
+        upstream_api_key: None,
+        mode: WardenMode::Enforce,
+        slack_webhook_url: None,
+    });
+    let app = build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, ledger)
+}
+
+#[tokio::test]
+async fn multi_agent_routes_each_token_to_its_own_agent_id() {
+    let upstream = spawn_stub_upstream().await;
+    let registry = AgentRegistry::parse("agent-a:tok-a,agent-b:tok-b").unwrap();
+    let (lite_addr, ledger) = spawn_lite_with_registry(
+        format!("http://{}/mcp", upstream),
+        registry,
+    )
+    .await;
+
+    // Agent A
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/mcp", lite_addr))
+        .header("Authorization", "Bearer tok-a")
+        .json(&serde_json::json!({"method": "call_tool", "params": {"name": "ping"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    // Agent B
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/mcp", lite_addr))
+        .header("Authorization", "Bearer tok-b")
+        .json(&serde_json::json!({"method": "call_tool", "params": {"name": "ping"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let entries_a = ledger.entries_for_agent("agent-a").await.unwrap();
+    let entries_b = ledger.entries_for_agent("agent-b").await.unwrap();
+    assert_eq!(entries_a.len(), 1);
+    assert_eq!(entries_b.len(), 1);
+    // Cross-check: no entries tagged as the wrong agent.
+    assert!(ledger.entries_for_agent("bearer-agent").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn multi_agent_rejects_unknown_token() {
+    let upstream = spawn_stub_upstream().await;
+    let registry = AgentRegistry::parse("agent-a:tok-a").unwrap();
+    let (lite_addr, ledger) =
+        spawn_lite_with_registry(format!("http://{}/mcp", upstream), registry).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/mcp", lite_addr))
+        .header("Authorization", "Bearer wrong-token")
+        .json(&serde_json::json!({"method": "call_tool", "params": {"name": "ping"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 401);
+    // Ledger should have no entries — auth fires before any pipeline work.
+    assert!(ledger.entries_for_agent("agent-a").await.unwrap().is_empty());
 }

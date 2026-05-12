@@ -19,7 +19,7 @@ use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 use warden_lite::ledger::Ledger;
 use warden_lite::policy::PolicyEngine;
-use warden_lite::proxy::{build_router, AppState, WardenMode};
+use warden_lite::proxy::{build_router, AgentRegistry, AppState, WardenMode};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -66,8 +66,18 @@ enum Command {
         /// Optional bearer token for inbound auth. If set, every
         /// `POST /mcp` must send `Authorization: Bearer <token>`.
         /// Read from `WARDEN_LITE_TOKEN` if not passed on the CLI.
+        /// Mutually exclusive with `--agents`; the multi-agent
+        /// registry takes precedence if both are set.
         #[arg(long, env = "WARDEN_LITE_TOKEN")]
         token: Option<String>,
+
+        /// Multi-agent registry. Comma-separated `id:token` pairs;
+        /// each token gets its own `agent_id` on the ledger and in
+        /// policy input. e.g.
+        /// `--agents agent-a:tok-a,agent-b:tok-b`. Env
+        /// `WARDEN_LITE_AGENTS`. Mutually exclusive with `--token`.
+        #[arg(long, env = "WARDEN_LITE_AGENTS")]
+        agents: Option<String>,
 
         /// Optional bearer token gating `POST /pending/{id}/decide`.
         /// If set, every decide call must send `Authorization: Bearer
@@ -226,6 +236,7 @@ async fn main() {
             ledger,
             velocity_window,
             token,
+            agents,
             decide_token,
             upstream_api_key,
             upstream_timeout_secs,
@@ -247,6 +258,7 @@ async fn main() {
                 ledger_path,
                 velocity_window,
                 token,
+                agents,
                 decide_token,
                 upstream_api_key,
                 upstream_timeout,
@@ -515,6 +527,7 @@ struct StartConfig {
     ledger_path: String,
     velocity_window: u64,
     token: Option<String>,
+    agents: Option<String>,
     decide_token: Option<String>,
     upstream_api_key: Option<String>,
     upstream_timeout: Duration,
@@ -567,12 +580,35 @@ async fn run_start(cfg: StartConfig) -> i32 {
         }
     };
 
+    // Build the agent registry. `--agents` takes precedence over the
+    // legacy single-token `--token` form; either alone activates
+    // inbound bearer auth. Neither means accept all connections
+    // (developer-laptop default).
+    let agents = match (cfg.agents.as_deref(), cfg.token.as_deref()) {
+        (Some(spec), _) => match AgentRegistry::parse(spec) {
+            Ok(r) => {
+                tracing::info!(
+                    agent_count = r.len(),
+                    agent_ids = ?r.agent_ids(),
+                    "multi-agent registry loaded"
+                );
+                Some(r)
+            }
+            Err(e) => {
+                eprintln!("error: failed to parse --agents: {}", e);
+                return 1;
+            }
+        },
+        (None, Some(t)) => Some(AgentRegistry::single(t.to_string())),
+        (None, None) => None,
+    };
+
     let state = Arc::new(AppState {
         policy,
         ledger,
         upstream_url: cfg.upstream.clone(),
         http,
-        bearer_token: cfg.token.clone(),
+        agents,
         decide_token: cfg.decide_token.clone(),
         upstream_api_key: cfg.upstream_api_key,
         mode: cfg.mode,
