@@ -39,7 +39,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::heuristics::{self, HeuristicVerdict};
-use crate::ledger::{DecideError, Ledger, LogRequest, ParkRequest, Pending, PendingFilter};
+use crate::ledger::{
+    DecideError, Ledger, LogRequest, ParkRequest, Pending, PendingFilter, PendingSort,
+};
 use crate::policy::{AgentHistory, PolicyDecision, PolicyEngine, PolicyInput};
 
 const CORRELATION_HEADER: &str = "X-Warden-Correlation-Id";
@@ -261,6 +263,12 @@ struct ListPendingParams {
     status: Option<String>,
     #[serde(default)]
     limit: Option<u32>,
+    /// `oldest` (triage queue) or `newest` (history). Default depends
+    /// on the status filter — `parked` reads oldest-first (handle the
+    /// longest-waiting first), `decided`/`all` read newest-first
+    /// (recent decisions are usually more interesting).
+    #[serde(default)]
+    sort: Option<String>,
 }
 
 const LIST_PENDING_DEFAULT_LIMIT: u32 = 50;
@@ -310,12 +318,28 @@ async fn handle_list_pendings(
                 .into_response();
         }
     };
+    let sort = match params.sort.as_deref() {
+        None => match filter {
+            PendingFilter::Parked => PendingSort::Oldest,
+            PendingFilter::Decided | PendingFilter::All => PendingSort::Newest,
+        },
+        Some("oldest") => PendingSort::Oldest,
+        Some("newest") => PendingSort::Newest,
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                warden_headers(&corr, state.mode, false, false),
+                format!("unknown sort {:?} (want oldest|newest)", other),
+            )
+                .into_response();
+        }
+    };
     let limit = params
         .limit
         .unwrap_or(LIST_PENDING_DEFAULT_LIMIT)
         .min(LIST_PENDING_MAX_LIMIT);
 
-    match state.ledger.list_pendings(filter, limit).await {
+    match state.ledger.list_pendings(filter, limit, sort).await {
         Ok(rows) => {
             let views: Vec<PendingView> = rows.into_iter().map(PendingView::from).collect();
             (
