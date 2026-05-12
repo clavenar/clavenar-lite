@@ -6,6 +6,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **SQLite WAL + busy_timeout** on ledger open. Lets the
+  `warden-lite audit` CLI read the ledger DB concurrently with a
+  running proxy (previously the second opener deadlocked on the
+  writer lock and hung indefinitely). `busy_timeout=5000` backstops
+  brief contention with a short wait instead of `SQLITE_BUSY`. The
+  `:memory:` path silently falls back to a memory-mode journal.
+
 ### Added
 
 - **`pending list` sort + color UX.** Triage-queue ergonomics: the
@@ -21,8 +30,9 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Python upstream stub, then exercises all three verdicts, the
   yellow-tier park-poll-decide loop, second-decide `409`, and the
   decide-token gating (rejecting an agent bearer on the operator
-  endpoint). 17 checks against the live HTTP surface; cleans up on
-  exit. Companion to `smoke-install.sh` (artifacts exist) — this one
+  endpoint), and a concurrent `warden-lite audit` CLI read against the
+  same DB file (proves WAL works). 20 checks against the live HTTP
+  surface; cleans up on exit. Companion to `smoke-install.sh` — this one
   verifies they actually work.
 
 ## [0.4.0] - 2026-05-12

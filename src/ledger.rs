@@ -212,6 +212,13 @@ impl Ledger {
     /// run an in-memory DB for tests. Creates the schema on first use.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
+        // WAL lets a second process (the `warden-lite audit` CLI) read
+        // the DB while the proxy holds the writer lock; rollback-journal
+        // mode would block both. busy_timeout backstops contention with
+        // a short wait instead of an immediate SQLITE_BUSY. The `:memory:`
+        // path silently falls back to a memory-mode journal — no error.
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "busy_timeout", 5000)?;
         init_schema(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
