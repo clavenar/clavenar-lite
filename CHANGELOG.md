@@ -4,10 +4,13 @@ All notable changes to `warden-lite` are documented here. Format based
 on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This
 project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-05-12
 
-Week-6 partner-readiness bundle. Targets a v0.4.0 cut at end-of-week
-once Slack webhook + fresh-host smoke test + demo wiring land.
+Partner-readiness release. Closes the gap between "partner says yes"
+and "partner is running warden-lite in front of their agent." Single
+binary now covers server + operator ops; yellow-tier parks alert
+Slack with a one-click-ready decide command line; the SDK demo
+demonstrates the canonical operator flow end-to-end.
 
 ### Added
 
@@ -128,6 +131,7 @@ with the embedded heuristic Brain, `regorus`-backed Rego policy
 engine, SHA-256 hash-chained SQLite ledger, and axum proxy. Wire
 format and chain shape are byte-compatible with the full edition.
 
+[0.4.0]: https://github.com/vanteguardlabs/warden-lite/releases/tag/v0.4.0
 [0.3.0]: https://github.com/vanteguardlabs/warden-lite/releases/tag/v0.3.0
 [0.2.0]: https://github.com/vanteguardlabs/warden-lite/releases/tag/v0.2.0
 [0.1.0]: https://github.com/vanteguardlabs/warden-lite/releases/tag/v0.1.0
