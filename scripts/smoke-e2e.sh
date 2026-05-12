@@ -79,6 +79,7 @@ socketserver.TCPServer(("", 9000), H).serve_forever()
     -e "WARDEN_LITE_TOKEN=$AGENT_TOKEN" \
     -e "WARDEN_LITE_DECIDE_TOKEN=$DECIDE_TOKEN" \
     -e "WARDEN_LITE_LEDGER=/tmp/warden-smoke.db" \
+    -e "WARDEN_LITE_MODE=enforce" \
     "ghcr.io/vanteguardlabs/warden-lite:$VERSION" >/dev/null
 
 echo "==> waiting for warden-lite to come up"

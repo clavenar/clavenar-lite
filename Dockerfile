@@ -48,10 +48,17 @@ USER 65532:65532
 # Read every knob from env so a `fly secrets set WARDEN_LITE_TOKEN=...`
 # or `docker run -e WARDEN_LITE_UPSTREAM_URL=...` works without an
 # argv override. CLI flags still win when passed.
+#
+# WARDEN_LITE_MODE defaults to observe so a bare
+# `docker run ghcr.io/vanteguardlabs/warden-lite:latest` boots without
+# 403-ing the first request — the 60-second-deploy promise in the
+# README. fly.toml and the static-binary snippet also default to
+# observe; flip to enforce via `fly secrets set` / `docker run -e` /
+# `--mode enforce` once verdicts are trustworthy.
 ENV WARDEN_LITE_PORT=8088 \
     WARDEN_LITE_POLICY_DIR=/etc/warden-lite/policies \
     WARDEN_LITE_LEDGER=:memory: \
-    WARDEN_LITE_MODE=enforce \
+    WARDEN_LITE_MODE=observe \
     RUST_LOG=info
 
 EXPOSE 8088
