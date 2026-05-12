@@ -27,6 +27,28 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
+  # End-to-end smoke. Builds the runtime image from the working tree
+  # and runs scripts/smoke-e2e.sh against it — three verdicts, the
+  # yellow-tier park-poll-decide loop, decide-token gating, and the
+  # concurrent audit-CLI read that proves WAL works. The gate the
+  # partner-day-1 README walks through; CI fails if any check trips.
+  smoke-e2e:
+    name: smoke-e2e (boot + verdicts + audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tag the locally-built image under the same coordinates the
+      # smoke script expects (`ghcr.io/vanteguardlabs/warden-lite:ci`)
+      # so the script doesn't need a CI-specific branch.
+      - name: Build runtime image
+        run: docker build -t ghcr.io/vanteguardlabs/warden-lite:ci .
+
+      - name: Run smoke-e2e
+        env:
+          WARDEN_LITE_VERSION: ci
+        run: ./scripts/smoke-e2e.sh
+
   # Supply-chain gate. cargo-deny runs four checks against `deny.toml` at
   # the repo root: advisories (RUSTSEC vulns + unmaintained), licenses
   # (allow-list), bans (multiple-version warnings), sources (only
