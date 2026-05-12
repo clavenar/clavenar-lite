@@ -239,13 +239,17 @@ status=$(curl -sS -o "$BODY" -w '%{http_code}' \
     -d '{"decision":"allow"}')
 check "decide-agent-token-rejected" [ "$status" = "401" ]
 
-# The `warden-lite audit` CLI is a local-SQLite tool intended for
-# operator triage after stopping the proxy — concurrent reads against
-# the same DB file while the proxy holds it for writes need WAL mode,
-# which isn't enabled today. The HTTP-surface checks above already
-# prove the ledger persisted both calls (pending list/get returned
-# them post-park, and the decide call landed a second row visible via
-# /pending/<id>). Leaving audit-CLI coverage to unit tests.
+# --- 7) Audit CLI — concurrent read against the live proxy ----------
+
+echo
+echo "==> 7. warden-lite audit bearer-agent (concurrent read, WAL-enabled)"
+"${DOCKER[@]}" exec "$LITE" warden-lite audit bearer-agent >"$BODY" 2>"$HEAD"
+rc=$?
+check "audit-cli-exit-0"       [ "$rc" = "0" ]
+check "audit-cli-has-rows"     grep -qE 'seq=[0-9]+ method=' "$BODY"
+# We've made at least 4 /mcp calls under bearer-agent: green search, red
+# sql_execute, yellow wire #1, yellow wire #2. Expect ≥4 ledger entries.
+check "audit-cli-counts-4+"    grep -qE '^[4-9][0-9]* entries for agent_id=bearer-agent|^[1-9][0-9]+ entries' "$BODY"
 
 # --- summary ---------------------------------------------------------
 
