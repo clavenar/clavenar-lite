@@ -118,6 +118,7 @@ async fn spawn_lite_with_slack(
         slack_webhook_url,
         callback_allowlist: Vec::new(),
         webhook_url: None,
+        rate_limiter: None,
     });
     let app = build_router(state);
 
@@ -1260,6 +1261,7 @@ async fn spawn_lite_with_registry(
         slack_webhook_url: None,
         callback_allowlist: Vec::new(),
         webhook_url: None,
+        rate_limiter: None,
     });
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1347,6 +1349,7 @@ async fn spawn_lite_with_callbacks(
         slack_webhook_url: None,
         callback_allowlist: allowlist,
         webhook_url: None,
+        rate_limiter: None,
     });
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1500,6 +1503,7 @@ async fn spawn_lite_with_webhook(
         slack_webhook_url: None,
         callback_allowlist: Vec::new(),
         webhook_url: Some(webhook_url),
+        rate_limiter: None,
     });
     let app = build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1676,4 +1680,81 @@ async fn webhook_fires_would_deny_in_observe_mode() {
     let bodies = wait_for_webhooks(&captured, 1).await;
     assert_eq!(bodies[0]["event"], "would_deny");
     assert_eq!(bodies[0]["mode"], "observe");
+}
+
+#[tokio::test]
+async fn rate_limit_gate_emits_429_with_json_body_and_ledger_row() {
+    use warden_lite::rate_limit::{RateLimitConfig, RateLimiter};
+    let upstream = spawn_stub_upstream().await;
+
+    // Hand-build AppState so we can inject a tight per-agent limiter
+    // (1 qps, burst 1). The shared `spawn_lite_*` helpers always pass
+    // `rate_limiter: None`; this is the only test that wires it on.
+    let policy = Arc::new(PolicyEngine::from_dir(&policies_dir(), 60).unwrap());
+    let ledger = Arc::new(Ledger::open(":memory:").unwrap());
+    let agents = Some(AgentRegistry::single("tok".into()));
+    let limiter = RateLimiter::from_config(RateLimitConfig {
+        qps: 1.0,
+        burst: 1,
+    })
+    .map(Arc::new);
+
+    let state = Arc::new(AppState {
+        policy,
+        ledger: ledger.clone(),
+        upstream_url: format!("http://{}/mcp", upstream),
+        http: reqwest::Client::new(),
+        agents,
+        decide_token: None,
+        upstream_api_key: None,
+        mode: WardenMode::Enforce,
+        slack_webhook_url: None,
+        callback_allowlist: Vec::new(),
+        webhook_url: None,
+        rate_limiter: limiter,
+    });
+    let app = build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let lite_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let client = reqwest::Client::new();
+    let req = || {
+        client
+            .post(format!("http://{}/mcp", lite_addr))
+            .bearer_auth("tok")
+            .json(&serde_json::json!({
+                "method": "call_tool",
+                "params": { "name": "ping" }
+            }))
+            .send()
+    };
+
+    // Burst-1 means request #1 consumes the lone token.
+    let r1 = req().await.unwrap();
+    assert_eq!(r1.status().as_u16(), 200);
+
+    // Request #2 should be over-limit and 429 with a JSON body.
+    let r2 = req().await.unwrap();
+    assert_eq!(r2.status().as_u16(), 429);
+    let body: serde_json::Value = r2.json().await.unwrap();
+    assert_eq!(body["error"], "rate_limited");
+    assert_eq!(body["agent_id"], "bearer-agent");
+    let retry_after = body["retry_after_secs"].as_u64().unwrap();
+    assert!(retry_after >= 1, "retry_after_secs must be >= 1");
+    assert!(body["correlation_id"].is_string());
+
+    // The ledger should now carry a RateLimitDenied row keyed to the
+    // same correlation_id the 429 body reported.
+    let throttled_corr = body["correlation_id"].as_str().unwrap();
+    let rows = ledger.entries_for_agent("bearer-agent").await.unwrap();
+    let rl_row = rows
+        .iter()
+        .find(|r| r.correlation_id.as_deref() == Some(throttled_corr))
+        .expect("ledger should carry a row matching the 429's correlation_id");
+    assert_eq!(rl_row.intent_category, "RateLimitDenied");
+    assert!(!rl_row.authorized);
 }

@@ -137,6 +137,23 @@ enum Command {
         /// humans). Env `WARDEN_LITE_WEBHOOK_URL`.
         #[arg(long, env = "WARDEN_LITE_WEBHOOK_URL")]
         webhook_url: Option<String>,
+
+        /// Per-agent rate-limit refill rate, requests/second. Default
+        /// 0 (disabled). When set, `/mcp` enforces a per-agent token
+        /// bucket *before* the brain/policy pipeline runs; an over-
+        /// limit agent gets HTTP 429 with a JSON body (`error`,
+        /// `agent_id`, `retry_after_secs`, `correlation_id`) and a
+        /// ledger row with `intent_category="RateLimitDenied"`. Env
+        /// `WARDEN_LITE_RATE_LIMIT_QPS`.
+        #[arg(long, env = "WARDEN_LITE_RATE_LIMIT_QPS")]
+        rate_limit_qps: Option<f64>,
+
+        /// Per-agent rate-limit bucket capacity (allows transient
+        /// spikes above `--rate-limit-qps`). Defaults to `ceil(qps)`
+        /// when unset; ignored when `--rate-limit-qps` is 0. Env
+        /// `WARDEN_LITE_RATE_LIMIT_BURST`.
+        #[arg(long, env = "WARDEN_LITE_RATE_LIMIT_BURST")]
+        rate_limit_burst: Option<u32>,
     },
 
     /// Walk every entry in the ledger and confirm the hash chain is
@@ -301,6 +318,8 @@ async fn main() {
             slack_webhook_url,
             callback_allowlist,
             webhook_url,
+            rate_limit_qps,
+            rate_limit_burst,
         } => {
             let port = port.unwrap_or(8088);
             let upstream = upstream.unwrap_or_else(|| "http://localhost:9000/mcp".into());
@@ -325,6 +344,8 @@ async fn main() {
                 slack_webhook_url,
                 callback_allowlist,
                 webhook_url,
+                rate_limit_qps,
+                rate_limit_burst,
             })
             .await
         }
@@ -604,6 +625,8 @@ struct StartConfig {
     slack_webhook_url: Option<String>,
     callback_allowlist: Option<String>,
     webhook_url: Option<String>,
+    rate_limit_qps: Option<f64>,
+    rate_limit_burst: Option<u32>,
 }
 
 /// Parse `--mode` / `WARDEN_LITE_MODE` into a {@link WardenMode}.
@@ -714,6 +737,19 @@ async fn run_start(cfg: StartConfig) -> i32 {
         return 1;
     }
 
+    // Build the optional rate limiter. `--rate-limit-qps 0` (the
+    // default) leaves it `None` — boot path skips the gate entirely
+    // and the request fast-path stays a single Option::is_none check.
+    let rate_limiter = {
+        let qps = cfg.rate_limit_qps.unwrap_or(0.0).max(0.0);
+        let burst = cfg.rate_limit_burst.unwrap_or_else(|| qps.ceil().max(1.0) as u32);
+        let config = warden_lite::rate_limit::RateLimitConfig { qps, burst };
+        if config.is_enabled() {
+            tracing::info!(qps, burst, "rate-limit per-agent enabled");
+        }
+        warden_lite::rate_limit::RateLimiter::from_config(config).map(Arc::new)
+    };
+
     let state = Arc::new(AppState {
         policy,
         ledger,
@@ -726,6 +762,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
         slack_webhook_url: cfg.slack_webhook_url.clone(),
         callback_allowlist,
         webhook_url: cfg.webhook_url.clone(),
+        rate_limiter,
     });
 
     // Install the Prometheus recorder once before any emit site fires.
@@ -748,6 +785,12 @@ async fn run_start(cfg: StartConfig) -> i32 {
     metrics::describe_counter!(
         "warden_lite_verdicts_total",
         "Terminal verdicts. verdict={allow,deny,pending,would_deny,would_pend}; the would_* family fires in observe mode."
+    );
+    metrics::describe_counter!(
+        "warden_lite_rate_limit_denied_total",
+        "Requests rejected at /mcp ingress by the per-agent token-bucket rate limiter. \
+         Fires before brain/policy work runs; the denial also emits a ledger row \
+         with intent_category=\"RateLimitDenied\"."
     );
 
     let app = build_router(state).route(

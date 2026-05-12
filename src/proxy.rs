@@ -55,6 +55,7 @@ use crate::ledger::{
     DecideError, Ledger, LogRequest, ParkRequest, Pending, PendingFilter, PendingSort,
 };
 use crate::policy::{AgentHistory, PolicyDecision, PolicyEngine, PolicyInput};
+use crate::rate_limit::{RateLimitOutcome, RateLimiter};
 use crate::webhook::{self, WebhookEvent};
 
 const CORRELATION_HEADER: &str = "X-Warden-Correlation-Id";
@@ -260,6 +261,13 @@ pub struct AppState {
     /// `slack_webhook_url` — Slack is Markdown for humans; this is
     /// JSON for SIEMs.
     pub webhook_url: Option<String>,
+    /// Optional per-agent token-bucket rate limiter. `None` when
+    /// `WARDEN_LITE_RATE_LIMIT_QPS` is unset (the default). When set,
+    /// the gate runs *before* the brain/policy pipeline so a runaway
+    /// agent doesn't burn local work, and a ledger row with
+    /// `intent_category="RateLimitDenied"` is emitted so audit shows
+    /// the throttle alongside Allow / Deny / Park.
+    pub rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 /// Wire shape for the `POST /mcp` request body. We accept any JSON
@@ -935,6 +943,52 @@ async fn handle_mcp(
         None => "anonymous".to_string(),
     };
 
+    // Rate-limit gate. Runs after agent_id is known so the denial
+    // names the right identity in the audit row + JSON body, but
+    // before brain/policy/parse work so a throttled agent doesn't
+    // burn local CPU. Emits a ledger row tagged
+    // `intent_category="RateLimitDenied"` so audit lists the throttle
+    // alongside Allow/Deny/Park.
+    if let Some(limiter) = state.rate_limiter.as_ref()
+        && let RateLimitOutcome::Denied {
+            agent_id: throttled,
+            retry_after_secs,
+        } = limiter.check(&agent_id)
+    {
+        metrics::counter!("warden_lite_rate_limit_denied_total").increment(1);
+        tracing::warn!(
+            agent_id = %throttled,
+            correlation_id = %correlation_id,
+            retry_after_secs,
+            "rate-limit deny"
+        );
+        let log_req = LogRequest {
+            agent_id: throttled.clone(),
+            method: "<unknown>".to_string(),
+            intent_category: "RateLimitDenied".to_string(),
+            authorized: false,
+            reasoning: format!("rate limit exceeded — retry_after={}s", retry_after_secs),
+            policy_decision: None,
+            correlation_id: Some(correlation_id.clone()),
+        };
+        if let Err(e) = state.ledger.append(log_req).await {
+            tracing::warn!("rate-limit ledger append failed: {}", e);
+        }
+        let body = serde_json::json!({
+            "error": "rate_limited",
+            "agent_id": throttled,
+            "retry_after_secs": retry_after_secs,
+            "correlation_id": correlation_id,
+        })
+        .to_string();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            warden_headers(&correlation_id, state.mode, false, false),
+            body,
+        )
+            .into_response();
+    }
+
     // Optional async-HIL callback URL. If the agent supplied a
     // `X-Warden-Callback-URL` header, validate it against the
     // configured allowlist BEFORE doing any pipeline work. Reject
@@ -1367,6 +1421,7 @@ mod tests {
             slack_webhook_url: None,
             callback_allowlist: Vec::new(),
             webhook_url: None,
+            rate_limiter: None,
         });
     }
 }

@@ -207,6 +207,29 @@ Every flag falls back to a `WARDEN_LITE_*` env var:
 | `--decide-token`           | `WARDEN_LITE_DECIDE_TOKEN`           | (none — open access)      |
 | `--slack-webhook-url`      | `WARDEN_LITE_SLACK_WEBHOOK_URL`      | (none — alerts off)       |
 | `--webhook-url`            | `WARDEN_LITE_WEBHOOK_URL`            | (none — webhook off)      |
+| `--rate-limit-qps`         | `WARDEN_LITE_RATE_LIMIT_QPS`         | 0 (rate limit off)        |
+| `--rate-limit-burst`       | `WARDEN_LITE_RATE_LIMIT_BURST`       | `ceil(qps)`               |
+
+### Per-agent rate limiting
+
+Set `--rate-limit-qps` (or `WARDEN_LITE_RATE_LIMIT_QPS`) above zero to
+turn on a per-agent token bucket at `/mcp` ingress. The gate runs
+*before* the brain/policy pipeline so a runaway agent doesn't burn
+local CPU. An over-limit request gets HTTP 429 with a JSON body:
+
+```json
+{
+  "error": "rate_limited",
+  "agent_id": "<agent>",
+  "retry_after_secs": 1,
+  "correlation_id": "..."
+}
+```
+
+Each 429 also writes a ledger row with
+`intent_category="RateLimitDenied"` so `warden-lite audit <agent>`
+surfaces the throttle alongside Allow / Deny / Park decisions, and a
+`warden_lite_rate_limit_denied_total` counter appears on `/metrics`.
 
 The upstream URL is parsed at startup and a typo fails fast with exit
 code `1` rather than 502-ing the first request through.

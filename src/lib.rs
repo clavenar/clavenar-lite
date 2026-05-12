@@ -7,6 +7,7 @@
 //! * [`policy`]     — embedded Rego policy engine (Layer 3).
 //! * [`ledger`]     — embedded SHA-256 hash-chained SQLite ledger (Layer 4).
 //! * [`proxy`]      — embedded HTTP proxy + orchestrator (Layer 1).
+//! * [`rate_limit`] — per-agent token-bucket gate at `/mcp` ingress.
 //! * [`slack`]      — optional Slack-webhook side-channel for park alerts.
 //! * [`webhook`]    — optional outbound JSON webhook for SIEM / Datadog ingest.
 //!
@@ -19,5 +20,6 @@ pub mod heuristics;
 pub mod ledger;
 pub mod policy;
 pub mod proxy;
+pub mod rate_limit;
 pub mod slack;
 pub mod webhook;
