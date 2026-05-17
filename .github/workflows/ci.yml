@@ -10,7 +10,7 @@ jobs:
     name: cargo check / test / clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -36,7 +36,7 @@ jobs:
     name: smoke-e2e (boot + verdicts + audit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Tag the locally-built image under the same coordinates the
       # smoke script expects (`ghcr.io/vanteguardlabs/warden-lite:ci`)
@@ -59,7 +59,7 @@ jobs:
     name: cargo-deny + cyclonedx SBOM
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
@@ -80,7 +80,7 @@ jobs:
         run: cargo cyclonedx --format json --describe crate
 
       - name: upload SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: sbom-${{ github.event.repository.name }}-${{ github.sha }}
           path: '*.cdx.json'
