@@ -21,7 +21,7 @@ path = "src/lib.rs"
 # HTTP server + extractors. Same axum/tokio pair as the full edition; keeps
 # the wire shape identical so an agent already pointed at a full warden-proxy
 # can be redirected to lite without code changes on the agent side.
-axum = "0.7"
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 # Outbound HTTP to the configured upstream LLM/tool endpoint. rustls-tls
 # instead of native-tls so a static cargo install on a fresh box doesn't

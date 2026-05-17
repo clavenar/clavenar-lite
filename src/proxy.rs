@@ -342,8 +342,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/readyz", get(readyz))
         .route("/mcp", post(handle_mcp))
         .route("/pending", get(handle_list_pendings))
-        .route("/pending/:id", get(handle_get_pending))
-        .route("/pending/:id/decide", post(handle_decide_pending))
+        .route("/pending/{id}", get(handle_get_pending))
+        .route("/pending/{id}/decide", post(handle_decide_pending))
         .with_state(state)
 }
 
