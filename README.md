@@ -1,5 +1,8 @@
 # warden-lite
 
+[![CI](https://github.com/vanteguardlabs/warden-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/vanteguardlabs/warden-lite/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+
 Single-binary OSS edition of [Agent Warden](https://github.com/vanteguardlabs).
 A drop-in proxy that sits between an AI agent and the LLM/tool API it
 calls — inspecting every request, evaluating policy, and writing a
