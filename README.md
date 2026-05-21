@@ -11,6 +11,12 @@ control plane.
 
 [![Deploy on Fly.io](https://fly.io/static/images/launch/deploy.svg)](https://fly.io/launch/?repo=https://github.com/vanteguardlabs/warden-lite)
 
+Sequence diagrams for the five primary runtime paths — boot pipeline,
+Green-tier `/mcp` fast path, Yellow-tier park with Slack + outbound
+webhook, operator decide + async-HIL callback, and `verify`
+chain-version dispatch — plus a tier/mode flowchart, live in
+[`docs/SEQUENCES.md`](docs/SEQUENCES.md).
+
 ## Run it in 60 seconds
 
 Pick whichever surface fits how you ship today. All three boot with
