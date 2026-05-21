@@ -32,7 +32,7 @@ sequenceDiagram
     participant Policy as PolicyEngine::from_dir
     participant Ledger as Ledger::open
     participant Reg as AgentRegistry::parse
-    participant State as Arc&lt;AppState&gt;
+    participant State as ArcAppState
     participant Prom as PrometheusBuilder
     participant Axum as axum::serve
 
@@ -50,12 +50,12 @@ sequenceDiagram
         Policy-->>CLI: Err
         CLI-->>Op: exit 1 (policy load failed)
     end
-    Policy-->>CLI: Arc&lt;PolicyEngine&gt; with regorus engine + VelocityTracker
+    Policy-->>CLI: ArcPolicyEngine with regorus engine + VelocityTracker
     CLI->>Ledger: open(ledger_path)
     Ledger->>Ledger: pragma WAL + busy_timeout=5000
     Ledger->>Ledger: init_schema — CREATE TABLE entries + pendings
     Ledger->>Ledger: idempotent ALTERs — chain_version, correlation_id, callback_url
-    Ledger-->>CLI: Arc&lt;Ledger&gt; (or exit 1 on sqlite error)
+    Ledger-->>CLI: ArcLedger (or exit 1 on sqlite error)
     CLI->>CLI: reqwest::Client::builder().timeout(upstream_timeout).build
     alt --agents set
         CLI->>Reg: parse(spec)
@@ -192,7 +192,7 @@ sequenceDiagram
         end
         Proxy-->>Agent: 202 Accepted + PendingResponse { status:pending, correlation_id, review_reasons } + X-Warden-Correlation-Id
     else mode == Observe
-        Note over Proxy: park branch skipped; falls through to forward
+        Note over Proxy: park branch skipped — falls through to forward
         Proxy->>Proxy: forward upstream as in Sec 2
         opt webhook_url set
             Proxy->>HookJob: spawn fire_event(event=would_park)
@@ -295,24 +295,24 @@ sequenceDiagram
             Rec->>Rec: hash = sha256(prev_hash || pipe || canonical(HashableEntryV1))
             Rec-->>Verify: Some(hex hash)
             alt prev_hash != expected_prev OR recomputed != entry_hash
-                Verify->>Verify: first_invalid = Some(entry.seq); break
+                Verify->>Verify: first_invalid = Some(entry.seq) — break
             else
-                Verify->>Verify: expected_prev = entry.entry_hash; count += 1
+                Verify->>Verify: expected_prev = entry.entry_hash — count += 1
             end
         else version unknown to this binary
             Rec-->>Verify: None
-            Verify->>Verify: unsupported_chain_version = Some(ver); break
+            Verify->>Verify: unsupported_chain_version = Some(ver) — break
         end
     end
     Verify-->>Main: VerifyResult { valid, entries_checked, first_invalid_seq, unsupported_chain_version }
     alt v.valid
-        Main-->>Op: stdout — ledger verified, N entries OK; exit 0
+        Main-->>Op: stdout — ledger verified, N entries OK — exit 0
     else first_invalid_seq is Some(seq)
-        Main-->>Op: stderr — tamper at seq, N valid before it; exit 2
+        Main-->>Op: stderr — tamper at seq, N valid before it — exit 2
     else unsupported_chain_version is Some(ver)
-        Main-->>Op: stderr — unsupported chain_version ver — upgrade warden-lite; exit 2
+        Main-->>Op: stderr — unsupported chain_version ver — upgrade warden-lite — exit 2
     else
-        Main-->>Op: stderr — verifier reported failure with no specific cause; exit 2
+        Main-->>Op: stderr — verifier reported failure with no specific cause — exit 2
     end
 ```
 
