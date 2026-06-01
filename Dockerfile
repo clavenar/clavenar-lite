@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Multi-stage build for warden-lite. Stage 1 produces the release
+# Multi-stage build for clavenar-lite. Stage 1 produces the release
 # binary against rust:1-bookworm; stage 2 lands the binary on
 # debian:bookworm-slim with the bundled default policies and runs
 # under the standard distroless-ish nonroot UID 65532.
@@ -8,7 +8,7 @@
 # Built artifact runs on port 8088 by default; mount a policy
 # directory or use the bundled governance.rego baseline. SQLite
 # ledger defaults to :memory: so the container is stateless out of
-# the box — set WARDEN_LITE_LEDGER=/var/lib/warden-lite/ledger.db and
+# the box — set CLAVENAR_LITE_LEDGER=/var/lib/clavenar-lite/ledger.db and
 # bind-mount a volume for persistence.
 
 # ---------- builder ----------
@@ -23,7 +23,7 @@ COPY policies ./policies
 # Build the release binary. Docker's layer cache keeps the COPY +
 # `cargo fetch`-warmed dependency graph hot across rebuilds that only
 # change source files, so iteration is cheap after the first build.
-RUN cargo build --release --locked --bin warden-lite
+RUN cargo build --release --locked --bin clavenar-lite
 
 # ---------- runtime ----------
 FROM debian:bookworm-slim AS runtime
@@ -37,31 +37,31 @@ RUN apt-get update && \
         ca-certificates \
         tini && \
     rm -rf /var/lib/apt/lists/* && \
-    mkdir -p /etc/warden-lite/policies /var/lib/warden-lite && \
-    chown -R 65532:65532 /var/lib/warden-lite
+    mkdir -p /etc/clavenar-lite/policies /var/lib/clavenar-lite && \
+    chown -R 65532:65532 /var/lib/clavenar-lite
 
-COPY --from=builder /build/target/release/warden-lite /usr/local/bin/warden-lite
-COPY --from=builder /build/policies /etc/warden-lite/policies
+COPY --from=builder /build/target/release/clavenar-lite /usr/local/bin/clavenar-lite
+COPY --from=builder /build/policies /etc/clavenar-lite/policies
 
 USER 65532:65532
 
-# Read every knob from env so a `fly secrets set WARDEN_LITE_TOKEN=...`
-# or `docker run -e WARDEN_LITE_UPSTREAM_URL=...` works without an
+# Read every knob from env so a `fly secrets set CLAVENAR_LITE_TOKEN=...`
+# or `docker run -e CLAVENAR_LITE_UPSTREAM_URL=...` works without an
 # argv override. CLI flags still win when passed.
 #
-# WARDEN_LITE_MODE defaults to observe so a bare
-# `docker run ghcr.io/vanteguardlabs/warden-lite:latest` boots without
+# CLAVENAR_LITE_MODE defaults to observe so a bare
+# `docker run ghcr.io/clavenar/clavenar-lite:latest` boots without
 # 403-ing the first request — the 60-second-deploy promise in the
 # README. fly.toml and the static-binary snippet also default to
 # observe; flip to enforce via `fly secrets set` / `docker run -e` /
 # `--mode enforce` once verdicts are trustworthy.
-ENV WARDEN_LITE_PORT=8088 \
-    WARDEN_LITE_POLICY_DIR=/etc/warden-lite/policies \
-    WARDEN_LITE_LEDGER=:memory: \
-    WARDEN_LITE_MODE=observe \
+ENV CLAVENAR_LITE_PORT=8088 \
+    CLAVENAR_LITE_POLICY_DIR=/etc/clavenar-lite/policies \
+    CLAVENAR_LITE_LEDGER=:memory: \
+    CLAVENAR_LITE_MODE=observe \
     RUST_LOG=info
 
 EXPOSE 8088
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/warden-lite"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/clavenar-lite"]
 CMD ["start"]

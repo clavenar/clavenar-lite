@@ -2,8 +2,8 @@
 //!
 //! Thin wrapper around `regorus::Engine` that loads every `*.rego` file
 //! under a configured policy directory at startup, and evaluates each
-//! request against `data.warden.authz.{allow,deny,review}`. Same wire
-//! shape as the full edition's `warden_policy_engine::PolicyDecision`,
+//! request against `data.clavenar.authz.{allow,deny,review}`. Same wire
+//! shape as the full edition's `clavenar_policy_engine::PolicyDecision`,
 //! so a custom `governance.rego` written for the full edition runs
 //! verbatim under Lite (and vice versa).
 //!
@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 /// Input to a policy evaluation. Field-for-field compatible with the full
-/// edition's `warden_policy_engine::PolicyInput` so a `governance.rego`
+/// edition's `clavenar_policy_engine::PolicyInput` so a `governance.rego`
 /// written for the full edition runs unchanged under Lite.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PolicyInput {
@@ -53,7 +53,7 @@ pub struct PolicyDecision {
     pub allow: bool,
     pub reasons: Vec<String>,
     /// In the full edition, non-empty `review_reasons` route the request
-    /// to warden-hil for human approval. Lite has no HIL, so we treat
+    /// to clavenar-hil for human approval. Lite has no HIL, so we treat
     /// any review match as a soft-deny — surfaced in the response but
     /// not auto-approved.
     #[serde(default)]
@@ -192,15 +192,15 @@ impl PolicyEngine {
             return deny_with(format!("Policy engine error (set_input): {}", e));
         }
 
-        let allow_value = match eval(&mut guard, "data.warden.authz.allow", "allow") {
+        let allow_value = match eval(&mut guard, "data.clavenar.authz.allow", "allow") {
             Ok(v) => v,
             Err(r) => return deny_with(r),
         };
-        let deny_value = match eval(&mut guard, "data.warden.authz.deny", "deny") {
+        let deny_value = match eval(&mut guard, "data.clavenar.authz.deny", "deny") {
             Ok(v) => v,
             Err(r) => return deny_with(r),
         };
-        let review_value = match eval(&mut guard, "data.warden.authz.review", "review") {
+        let review_value = match eval(&mut guard, "data.clavenar.authz.review", "review") {
             Ok(v) => v,
             Err(r) => return deny_with(r),
         };

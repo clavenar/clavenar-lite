@@ -1,15 +1,15 @@
-# warden-lite
+# clavenar-lite
 
-[![CI](https://github.com/vanteguardlabs/warden-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/vanteguardlabs/warden-lite/actions/workflows/ci.yml)
+[![CI](https://github.com/clavenar/clavenar-lite/actions/workflows/ci.yml/badge.svg)](https://github.com/clavenar/clavenar-lite/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
-Single-binary OSS edition of [Agent Warden](https://github.com/vanteguardlabs).
+Single-binary OSS edition of [Clavenar](https://github.com/clavenar).
 A drop-in proxy that sits between an AI agent and the LLM/tool API it
 calls — inspecting every request, evaluating policy, and writing a
 hash-chained forensic ledger — without standing up a multi-service
 control plane.
 
-[![Deploy on Fly.io](https://fly.io/static/images/launch/deploy.svg)](https://fly.io/launch/?repo=https://github.com/vanteguardlabs/warden-lite)
+[![Deploy on Fly.io](https://fly.io/static/images/launch/deploy.svg)](https://fly.io/launch/?repo=https://github.com/clavenar/clavenar-lite)
 
 Sequence diagrams for the five primary runtime paths — boot pipeline,
 Green-tier `/mcp` fast path, Yellow-tier park with Slack + outbound
@@ -27,9 +27,9 @@ Pick whichever surface fits how you ship today. All three boot with
 
 ```bash
 docker run -p 8088:8088 \
-  -e WARDEN_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completions \
-  -e WARDEN_LITE_MODE=observe \
-  ghcr.io/vanteguardlabs/warden-lite:latest
+  -e CLAVENAR_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completions \
+  -e CLAVENAR_LITE_MODE=observe \
+  ghcr.io/clavenar/clavenar-lite:latest
 ```
 
 The image is multi-arch (`linux/amd64` + `linux/arm64`), published from
@@ -41,7 +41,7 @@ newest tagged release.
 
 ```bash
 fly launch --copy-config
-fly secrets set WARDEN_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completions
+fly secrets set CLAVENAR_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completions
 fly deploy
 ```
 
@@ -49,9 +49,9 @@ fly deploy
 
 ```bash
 V=0.4.0
-curl -fsSL "https://github.com/vanteguardlabs/warden-lite/releases/download/v${V}/warden-lite-${V}-x86_64-linux-musl.tar.gz" \
+curl -fsSL "https://github.com/clavenar/clavenar-lite/releases/download/v${V}/clavenar-lite-${V}-x86_64-linux-musl.tar.gz" \
   | tar -xz
-./warden-lite start --mode observe \
+./clavenar-lite start --mode observe \
   --upstream https://api.openai.com/v1/chat/completions
 ```
 
@@ -68,30 +68,30 @@ curl -i http://localhost:8088/mcp \
        "params":{"name":"search","arguments":{"q":"hello"}}}'
 ```
 
-Every response carries `X-Warden-Mode`, `X-Warden-Correlation-Id`,
-and (in observe, on would-have-denied requests) `X-Warden-Would-Deny:
+Every response carries `X-Clavenar-Mode`, `X-Clavenar-Correlation-Id`,
+and (in observe, on would-have-denied requests) `X-Clavenar-Would-Deny:
 true`. The correlation id round-trips into the audit ledger so you
 can look the call up later:
 
 ```bash
-warden-lite audit anonymous
-warden-lite verify
+clavenar-lite audit anonymous
+clavenar-lite verify
 ```
 
 ## Try it with your agent
 
 The companion TypeScript SDK,
-[`@vanteguardlabs/warden-ai-sdk`](https://www.npmjs.com/package/@vanteguardlabs/warden-ai-sdk),
+[`@vanteguardlabs/clavenar-ai-sdk`](https://www.npmjs.com/package/@vanteguardlabs/clavenar-ai-sdk),
 wraps your Anthropic / OpenAI client so every `tool_use` is
 inspected before your tool-execution loop sees it. Point it at the
 local proxy:
 
 ```ts
 import Anthropic from '@anthropic-ai/sdk';
-import { wardenWrap, WardenDenied } from '@vanteguardlabs/warden-ai-sdk';
+import { clavenarWrap, ClavenarDenied } from '@vanteguardlabs/clavenar-ai-sdk';
 
-const client = wardenWrap(new Anthropic(), {
-  endpoint: 'http://localhost:8088',   // the warden-lite you just booted
+const client = clavenarWrap(new Anthropic(), {
+  endpoint: 'http://localhost:8088',   // the clavenar-lite you just booted
   mode: 'enforce',                     // throw on deny; 'observe' to passthrough
 });
 
@@ -102,7 +102,7 @@ try {
     messages: [{ role: 'user', content: 'delete the alice user' }],
   });
 } catch (e) {
-  if (e instanceof WardenDenied) {
+  if (e instanceof ClavenarDenied) {
     console.warn('blocked', e.toolName, e.reasons, e.correlationId);
   }
 }
@@ -110,7 +110,7 @@ try {
 
 OpenAI works the same way — pass `new OpenAI()` instead, the SDK
 auto-detects the client shape. See the
-[SDK README](https://github.com/vanteguardlabs/warden-ai-sdk) for
+[SDK README](https://github.com/clavenar/clavenar-ai-sdk) for
 streaming, observe mode, retry, and verdict-callback options.
 
 ## What's in the box
@@ -123,7 +123,7 @@ streaming, observe mode, retry, and verdict-callback options.
 | **Proxy**            | HTTP ingress, security-first orchestration, upstream credential injection | axum + reqwest, optional bearer-token auth                     |
 
 The chain format and policy input shape are byte-compatible with the
-full Agent Warden edition. A chain produced by `warden-lite` verifies
+full Clavenar edition. A chain produced by `clavenar-lite` verifies
 under the production ledger; a `governance.rego` written for the full
 edition runs verbatim under Lite.
 
@@ -131,33 +131,33 @@ edition runs verbatim under Lite.
 
 For real traffic, layer these on top of the default deploy:
 
-- **Persistent ledger.** Mount a volume at `/var/lib/warden-lite` and
-  set `WARDEN_LITE_LEDGER=/var/lib/warden-lite/ledger.db`. The hash
-  chain survives restarts; `warden-lite verify` keeps validating.
+- **Persistent ledger.** Mount a volume at `/var/lib/clavenar-lite` and
+  set `CLAVENAR_LITE_LEDGER=/var/lib/clavenar-lite/ledger.db`. The hash
+  chain survives restarts; `clavenar-lite verify` keeps validating.
 - **Custom policies.** Bind-mount your own Rego directory at
-  `/etc/warden-lite/policies` (or any path you prefer with
-  `WARDEN_LITE_POLICY_DIR`). The bundled `governance.rego` is a
+  `/etc/clavenar-lite/policies` (or any path you prefer with
+  `CLAVENAR_LITE_POLICY_DIR`). The bundled `governance.rego` is a
   starting baseline, not a finished policy.
-- **Ingress auth.** Set `WARDEN_LITE_TOKEN`; partners then send
+- **Ingress auth.** Set `CLAVENAR_LITE_TOKEN`; partners then send
   `Authorization: Bearer <token>` and unauthenticated requests get
   401. Without it the proxy accepts every connection.
-- **Multi-agent.** Set `WARDEN_LITE_AGENTS=agent-a:tok-a,agent-b:tok-b`
+- **Multi-agent.** Set `CLAVENAR_LITE_AGENTS=agent-a:tok-a,agent-b:tok-b`
   to front N agents from one binary. Each token gets its own
   `agent_id` on the ledger and in `input.agent_id` so Rego rules
   can scope tool access per agent. Mutually exclusive with the
-  single-agent `WARDEN_LITE_TOKEN`; both being set picks the
+  single-agent `CLAVENAR_LITE_TOKEN`; both being set picks the
   registry. Tokens must be unique across agents.
 - **Async-HIL webhooks.** Set
-  `WARDEN_LITE_CALLBACK_ALLOWLIST=https://my-app.example.com/`
+  `CLAVENAR_LITE_CALLBACK_ALLOWLIST=https://my-app.example.com/`
   (comma-separated prefixes) to enable agent-supplied callback
-  URLs. Agents send `X-Warden-Callback-URL: <url>` on `/mcp`; on
-  operator decide warden POSTs `{correlation_id, decision,
+  URLs. Agents send `X-Clavenar-Callback-URL: <url>` on `/mcp`; on
+  operator decide clavenar POSTs `{correlation_id, decision,
   decider_note, decided_at}` to that URL fire-and-forget. URLs
   outside the allowlist are rejected with 400. Unset (the default)
   rejects callbacks entirely — partners poll
   `GET /pending/{id}`.
 - **Outbound verdict webhooks.** Set
-  `WARDEN_LITE_WEBHOOK_URL=https://siem.example.com/ingest` to
+  `CLAVENAR_LITE_WEBHOOK_URL=https://siem.example.com/ingest` to
   fire-and-forget a structured JSON event on every terminal
   pipeline outcome (`allow` / `deny` / `park`, plus `would_deny` /
   `would_park` in observe mode) and on every operator decide
@@ -168,60 +168,60 @@ For real traffic, layer these on top of the default deploy:
   with a 5s per-request timeout; failures land at `warn` and never
   delay the agent or operator response. The ledger remains the
   durable source of truth.
-- **Upstream creds.** `WARDEN_LITE_UPSTREAM_API_KEY` injects the key
+- **Upstream creds.** `CLAVENAR_LITE_UPSTREAM_API_KEY` injects the key
   into forwarded requests so your agent never sees it. Same shape
   as the full edition's Vault injection, minus Vault.
-- **Enforce mode.** Flip `WARDEN_LITE_MODE=enforce` once the observe
+- **Enforce mode.** Flip `CLAVENAR_LITE_MODE=enforce` once the observe
   data is clean.
 
 ## Subcommands
 
 ```
-warden-lite start [--port N] [--upstream URL] [--policies DIR] [--ledger PATH]
+clavenar-lite start [--port N] [--upstream URL] [--policies DIR] [--ledger PATH]
                   [--velocity-window SECS] [--token TOKEN] [--agents SPEC]
                   [--decide-token TOKEN] [--upstream-api-key KEY]
                   [--upstream-timeout-secs SECS] [--slack-webhook-url URL]
                   [--callback-allowlist PREFIXES] [--webhook-url URL]
-warden-lite verify [--ledger PATH]
-warden-lite audit  [--ledger PATH] <agent_id>
-warden-lite backup  [--ledger PATH] --output FILE
-warden-lite restore --input FILE [--ledger PATH] [--force]
-warden-lite pending list   [--endpoint URL] [--decide-token TOKEN]
+clavenar-lite verify [--ledger PATH]
+clavenar-lite audit  [--ledger PATH] <agent_id>
+clavenar-lite backup  [--ledger PATH] --output FILE
+clavenar-lite restore --input FILE [--ledger PATH] [--force]
+clavenar-lite pending list   [--endpoint URL] [--decide-token TOKEN]
                             [--status parked|decided|all] [--limit N]
                             [--sort oldest|newest] [--json]
-warden-lite pending get    <correlation_id> [--endpoint URL] [--token TOKEN] [--json]
-warden-lite pending decide <correlation_id> --allow | --deny [--note STRING]
+clavenar-lite pending get    <correlation_id> [--endpoint URL] [--token TOKEN] [--json]
+clavenar-lite pending decide <correlation_id> --allow | --deny [--note STRING]
                             [--endpoint URL] [--decide-token TOKEN]
 ```
 
-The `pending` subcommands talk to a *running* warden-lite over HTTP —
+The `pending` subcommands talk to a *running* clavenar-lite over HTTP —
 the same endpoints your agent posts to. Operators use them to triage
 parked tool calls without curl'ing the API directly.
 
-Every flag falls back to a `WARDEN_LITE_*` env var:
+Every flag falls back to a `CLAVENAR_LITE_*` env var:
 
 | Flag                       | Env var                              | Default                   |
 |----------------------------|--------------------------------------|---------------------------|
-| `--port`                   | `WARDEN_LITE_PORT`                   | 8088                      |
-| `--upstream`               | `WARDEN_LITE_UPSTREAM_URL`           | http://localhost:9000/mcp |
-| `--policies`               | `WARDEN_LITE_POLICY_DIR`             | ./policies                |
-| `--ledger`                 | `WARDEN_LITE_LEDGER`                 | ./warden-lite.db          |
-| `--velocity-window`        | `WARDEN_LITE_VELOCITY_WINDOW_SECS`   | 60                        |
-| `--token`                  | `WARDEN_LITE_TOKEN`                  | (none — open access)      |
-| `--agents`                 | `WARDEN_LITE_AGENTS`                 | (none — single-agent)     |
-| `--callback-allowlist`     | `WARDEN_LITE_CALLBACK_ALLOWLIST`     | (none — callbacks off)    |
-| `--upstream-api-key`       | `WARDEN_LITE_UPSTREAM_API_KEY`       | (none — pass-through)     |
-| `--upstream-timeout-secs`  | `WARDEN_LITE_UPSTREAM_TIMEOUT_SECS`  | 120                       |
-| `--mode`                   | `WARDEN_LITE_MODE`                   | `enforce`                 |
-| `--decide-token`           | `WARDEN_LITE_DECIDE_TOKEN`           | (none — open access)      |
-| `--slack-webhook-url`      | `WARDEN_LITE_SLACK_WEBHOOK_URL`      | (none — alerts off)       |
-| `--webhook-url`            | `WARDEN_LITE_WEBHOOK_URL`            | (none — webhook off)      |
-| `--rate-limit-qps`         | `WARDEN_LITE_RATE_LIMIT_QPS`         | 0 (rate limit off)        |
-| `--rate-limit-burst`       | `WARDEN_LITE_RATE_LIMIT_BURST`       | `ceil(qps)`               |
+| `--port`                   | `CLAVENAR_LITE_PORT`                   | 8088                      |
+| `--upstream`               | `CLAVENAR_LITE_UPSTREAM_URL`           | http://localhost:9000/mcp |
+| `--policies`               | `CLAVENAR_LITE_POLICY_DIR`             | ./policies                |
+| `--ledger`                 | `CLAVENAR_LITE_LEDGER`                 | ./clavenar-lite.db          |
+| `--velocity-window`        | `CLAVENAR_LITE_VELOCITY_WINDOW_SECS`   | 60                        |
+| `--token`                  | `CLAVENAR_LITE_TOKEN`                  | (none — open access)      |
+| `--agents`                 | `CLAVENAR_LITE_AGENTS`                 | (none — single-agent)     |
+| `--callback-allowlist`     | `CLAVENAR_LITE_CALLBACK_ALLOWLIST`     | (none — callbacks off)    |
+| `--upstream-api-key`       | `CLAVENAR_LITE_UPSTREAM_API_KEY`       | (none — pass-through)     |
+| `--upstream-timeout-secs`  | `CLAVENAR_LITE_UPSTREAM_TIMEOUT_SECS`  | 120                       |
+| `--mode`                   | `CLAVENAR_LITE_MODE`                   | `enforce`                 |
+| `--decide-token`           | `CLAVENAR_LITE_DECIDE_TOKEN`           | (none — open access)      |
+| `--slack-webhook-url`      | `CLAVENAR_LITE_SLACK_WEBHOOK_URL`      | (none — alerts off)       |
+| `--webhook-url`            | `CLAVENAR_LITE_WEBHOOK_URL`            | (none — webhook off)      |
+| `--rate-limit-qps`         | `CLAVENAR_LITE_RATE_LIMIT_QPS`         | 0 (rate limit off)        |
+| `--rate-limit-burst`       | `CLAVENAR_LITE_RATE_LIMIT_BURST`       | `ceil(qps)`               |
 
 ### Per-agent rate limiting
 
-Set `--rate-limit-qps` (or `WARDEN_LITE_RATE_LIMIT_QPS`) above zero to
+Set `--rate-limit-qps` (or `CLAVENAR_LITE_RATE_LIMIT_QPS`) above zero to
 turn on a per-agent token bucket at `/mcp` ingress. The gate runs
 *before* the brain/policy pipeline so a runaway agent doesn't burn
 local CPU. An over-limit request gets HTTP 429 with a JSON body:
@@ -236,49 +236,49 @@ local CPU. An over-limit request gets HTTP 429 with a JSON body:
 ```
 
 Each 429 also writes a ledger row with
-`intent_category="RateLimitDenied"` so `warden-lite audit <agent>`
+`intent_category="RateLimitDenied"` so `clavenar-lite audit <agent>`
 surfaces the throttle alongside Allow / Deny / Park decisions, and a
-`warden_lite_rate_limit_denied_total` counter appears on `/metrics`.
+`clavenar_lite_rate_limit_denied_total` counter appears on `/metrics`.
 
 The upstream URL is parsed at startup and a typo fails fast with exit
 code `1` rather than 502-ing the first request through.
 
 ## Rollout: observe before enforce
 
-`--mode observe` flips warden-lite into a pass-through observability
+`--mode observe` flips clavenar-lite into a pass-through observability
 layer:
 
 - Every request forwards upstream regardless of policy / Brain verdict.
 - The ledger still records `authorized=false` for would-have-denied
   requests, so the audit trail of what enforce mode *would* have done
   stays accurate.
-- Every response carries `X-Warden-Mode: observe`. Would-have-denied
-  responses also carry `X-Warden-Would-Deny: true` — count those to
+- Every response carries `X-Clavenar-Mode: observe`. Would-have-denied
+  responses also carry `X-Clavenar-Would-Deny: true` — count those to
   size the blast radius of flipping enforce on.
 
 Recommended rollout: deploy in observe for a week, watch the
-`X-Warden-Would-Deny` rate per tool in your dashboards, tune policies
+`X-Clavenar-Would-Deny` rate per tool in your dashboards, tune policies
 until the rate is on the floor of "things that genuinely should be
-denied," then flip `WARDEN_LITE_MODE=enforce` and pop the gate.
+denied," then flip `CLAVENAR_LITE_MODE=enforce` and pop the gate.
 
 ```bash
-warden-lite start --mode observe --upstream https://api.openai.com/v1
+clavenar-lite start --mode observe --upstream https://api.openai.com/v1
 ```
 
 ## Backup + restore
 
 ```bash
 # Snapshot the live ledger to a portable file. Safe to run against a
-# running warden-lite — uses SQLite's online-backup API.
-warden-lite backup --output snapshot.db
+# running clavenar-lite — uses SQLite's online-backup API.
+clavenar-lite backup --output snapshot.db
 
 # Restore from a snapshot. Verifies the snapshot's chain BEFORE
 # touching the target; refuses to overwrite an existing ledger
-# without --force. Recommended: stop warden-lite, restore, restart.
-warden-lite restore --input snapshot.db --force
+# without --force. Recommended: stop clavenar-lite, restore, restart.
+clavenar-lite restore --input snapshot.db --force
 ```
 
-The snapshot is a self-contained SQLite DB; `warden-lite verify
+The snapshot is a self-contained SQLite DB; `clavenar-lite verify
 --ledger snapshot.db` is a valid sanity check on its own. Schema
 migrations for older ledgers run on the first `Ledger::open`
 automatically — no manual SQL surgery needed.
@@ -326,8 +326,8 @@ Three outcomes are possible:
   ```
 
 Every response — including 401, 400, and 5xx — carries an
-`X-Warden-Correlation-Id` header so a partner can pivot from a thrown
-error in SDK code to the matching row in `warden-lite audit`.
+`X-Clavenar-Correlation-Id` header so a partner can pivot from a thrown
+error in SDK code to the matching row in `clavenar-lite audit`.
 
 Exit codes from the `verify` subcommand are CI-friendly: `0` valid, `2`
 chain corruption detected, `1` runtime error (DB unreadable, etc.).
@@ -336,7 +336,7 @@ chain corruption detected, `1` runtime error (DB unreadable, etc.).
 
 When policy returns `allow: true` with `review` non-empty (the
 `wire_transfer` rule in the default `governance.rego` is the
-canonical example), warden-lite parks the request:
+canonical example), clavenar-lite parks the request:
 
 1. **Park** — `POST /mcp` returns `202` with `{status, correlation_id,
    review_reasons}`. The pendings table records the call; one ledger
@@ -377,18 +377,18 @@ $ curl -sS -X POST http://localhost:8088/mcp \
 # {"status":"pending","correlation_id":"8f1d...","review_reasons":[...]}
 
 # Approve it (operator-side) — either curl, or the built-in CLI:
-$ warden-lite pending list --decide-token op-token
+$ clavenar-lite pending list --decide-token op-token
 CORRELATION_ID                         AGENT_ID         TOOL_TYPE        REQUESTED_AT         STATUS
 8f1d...                                bearer-agent     wire_transfer    2026-05-12T10:14:03Z parked
 
-$ warden-lite pending decide 8f1d... --decide-token op-token --allow --note "ok by sec"
+$ clavenar-lite pending decide 8f1d... --decide-token op-token --allow --note "ok by sec"
 ok: pending 8f1d... decided allow
 ```
 
 The CLI is a thin wrapper over `/pending/*` — partners can use either,
 and the wire format is the source of truth. `--endpoint`,
-`--decide-token`, and `--token` fall back to `WARDEN_LITE_URL`,
-`WARDEN_LITE_DECIDE_TOKEN`, and `WARDEN_LITE_TOKEN` respectively.
+`--decide-token`, and `--token` fall back to `CLAVENAR_LITE_URL`,
+`CLAVENAR_LITE_DECIDE_TOKEN`, and `CLAVENAR_LITE_TOKEN` respectively.
 
 Auth tokens are independent: set neither for developer-laptop use,
 set just `--token` to gate the agent surface, set both when there's a
@@ -397,14 +397,14 @@ real operator workflow.
 ### Slack alerts (optional)
 
 Pass `--slack-webhook-url https://hooks.slack.com/services/...` (or
-set `WARDEN_LITE_SLACK_WEBHOOK_URL`) to fire a one-way alert into a
+set `CLAVENAR_LITE_SLACK_WEBHOOK_URL`) to fire a one-way alert into a
 Slack channel each time a tool call lands in the pendings table. The
 message carries the correlation id, agent id, tool, the review reasons
-that fired, and the exact `warden-lite pending decide` invocation an
+that fired, and the exact `clavenar-lite pending decide` invocation an
 operator would run to approve or deny:
 
 ```
-:warning: Agent Warden parked a tool call for review
+:warning: Clavenar parked a tool call for review
 
 *Tool:* `wire_transfer`
 *Agent:* `bearer-agent`
@@ -412,8 +412,8 @@ operator would run to approve or deny:
 *Reasons:*
   • Review: Wire transfers require human approval before execution.
 
-Approve: `warden-lite pending decide 8f1d-… --allow`
-Deny:    `warden-lite pending decide 8f1d-… --deny --note "…"`
+Approve: `clavenar-lite pending decide 8f1d-… --allow`
+Deny:    `clavenar-lite pending decide 8f1d-… --deny --note "…"`
 ```
 
 Fire-and-forget by design: a slow or unreachable Slack never blocks
@@ -430,7 +430,7 @@ point `--policies`). The bundled `governance.rego` covers the
 canonical denylist (`sql_execute`, `shell_exec`), the intent-score
 threshold, the bulk-export business-hours rule, the velocity circuit
 breaker, and the wire-transfer review tier. Add your own rules under
-`package warden.authz`; they merge into the existing `allow` / `deny`
+`package clavenar.authz`; they merge into the existing `allow` / `deny`
 / `review` rule sets at evaluation time.
 
 The Rego input shape is the full edition's `PolicyInput`:
@@ -461,7 +461,7 @@ Lite is for developer-laptop use. It deliberately omits:
   prompt injection, you need the full edition.
 - **mTLS.** Lite uses optional bearer-token auth over plain HTTP.
   Production deployments need certificate-based agent identity, which
-  is what the full edition's `warden-proxy` provides.
+  is what the full edition's `clavenar-proxy` provides.
 - **Vault.** Upstream API keys are passed via env var. The full
   edition pulls per-agent credentials from HashiCorp Vault on every
   request, so a leaked agent process can't exfiltrate the upstream
@@ -469,7 +469,7 @@ Lite is for developer-laptop use. It deliberately omits:
 - **Human-in-the-Loop (HIL).** Yellow-tier requests
   (e.g. `wire_transfer`) are *soft-denied* in Lite — the response
   carries the review reason and the request is rejected. The full
-  edition's `warden-hil` orchestrator routes these to a Slack /
+  edition's `clavenar-hil` orchestrator routes these to a Slack /
   Teams approval flow with a human approver and resumes upstream
   forward on Approved.
 - **Multi-instance velocity tracking.** Lite's tracker is in-process.
@@ -484,7 +484,7 @@ Lite is for developer-laptop use. It deliberately omits:
   tamper (point at the first bad seq).
 
 If any of those bullets are critical to your deployment, ship to the
-full Agent Warden control plane. Lite is the OSS top-of-funnel
+full Clavenar control plane. Lite is the OSS top-of-funnel
 surface; the full edition is the production product.
 
 ## License

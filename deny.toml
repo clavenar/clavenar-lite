@@ -1,7 +1,7 @@
-# cargo-deny configuration for Agent Warden services.
+# cargo-deny configuration for Clavenar services.
 # See https://embarkstudios.github.io/cargo-deny/checks/cfg.html
 #
-# Synced verbatim across all 14 Rust repos. Edit warden-specs first if you
+# Synced verbatim across all 14 Rust repos. Edit clavenar-specs first if you
 # need to change policy, then mirror into every other repo's deny.toml so
 # CI gates stay uniform.
 
@@ -22,14 +22,14 @@ ignore = [
 
     # bincode is unmaintained (RUSTSEC-2025-0141). The advisory has
     # `patched = []` — bincode 2.x is also flagged. Pulled in via regorus
-    # (rego policy engine in warden-policy-engine), which has no replacement.
+    # (rego policy engine in clavenar-policy-engine), which has no replacement.
     "RUSTSEC-2025-0141",
 
     # rustls-webpki 0.101.7 vulns (RUSTSEC-2026-0098/0099/0104). The async-nats
     # 0.36 → 0.47 bump cleared the NATS-side path (and the entirely-different
     # RUSTSEC-2026-0049 with it), but two other transitive paths remain:
-    #   • warden-console: openidconnect 3.5 → oauth2 4 → reqwest 0.11 → rustls 0.21
-    #   • warden-ledger:  aws-sdk-s3 1 → aws-smithy-http-client 1 → hyper-rustls 0.24 → rustls 0.21
+    #   • clavenar-console: openidconnect 3.5 → oauth2 4 → reqwest 0.11 → rustls 0.21
+    #   • clavenar-ledger:  aws-sdk-s3 1 → aws-smithy-http-client 1 → hyper-rustls 0.24 → rustls 0.21
     # Closes when openidconnect 4.x ships (it picks up rustcrypto/rsa 0.10
     # at the same time, also clearing RUSTSEC-2023-0071) and aws-smithy migrates
     # off rustls 0.21. The proxy mTLS path uses rustls 0.23.40 / webpki 0.103.13
@@ -41,7 +41,7 @@ ignore = [
     "RUSTSEC-2026-0104",
 
     # rsa Marvin Attack (RUSTSEC-2023-0071). Pulled in via openidconnect 3.5
-    # (warden-console only). No safe upgrade — RustCrypto's `rsa` crate has
+    # (clavenar-console only). No safe upgrade — RustCrypto's `rsa` crate has
     # no fixed release. The OIDC token verification path uses RS256 RSA-PKCS1
     # which is the affected primitive, but the timing sidechannel requires
     # an attacker controlling network conditions to the IdP — the threat
@@ -51,7 +51,7 @@ ignore = [
     "RUSTSEC-2023-0071",
 
     # paste 1.0 unmaintained (RUSTSEC-2024-0436). Pulled in transitively via
-    # parquet 53/57 (warden-ledger Iceberg export path). No safe upgrade —
+    # parquet 53/57 (clavenar-ledger Iceberg export path). No safe upgrade —
     # parquet hasn't migrated off paste yet. Pure proc-macro code generation;
     # no runtime impact.
     "RUSTSEC-2024-0436",

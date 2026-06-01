@@ -1,8 +1,8 @@
-# Warden Lite — default authorization policy.
+# Clavenar Lite — default authorization policy.
 #
-# Loaded by warden-lite at startup. The Rust evaluator queries
-# `data.warden.authz.allow` (bool), `data.warden.authz.deny`
-# (set[string]), and `data.warden.authz.review` (set[string]). The
+# Loaded by clavenar-lite at startup. The Rust evaluator queries
+# `data.clavenar.authz.allow` (bool), `data.clavenar.authz.deny`
+# (set[string]), and `data.clavenar.authz.review` (set[string]). The
 # combination decides the tier:
 #
 #   deny non-empty               → red (403 in enforce mode)
@@ -14,7 +14,7 @@
 # Identical-in-shape to the full edition's policies/governance.rego so
 # rules copy between editions.
 
-package warden.authz
+package clavenar.authz
 
 import rego.v1
 
@@ -67,9 +67,9 @@ deny contains msg if {
 }
 
 # --- Yellow tier (parked for human review) ---
-# As of warden-lite 0.3 these route to the embedded HIL store: a 202
+# As of clavenar-lite 0.3 these route to the embedded HIL store: a 202
 # response carrying the correlation id, awaiting an operator decision
-# via POST /pending/:id/decide. The full edition routes to warden-hil
+# via POST /pending/:id/decide. The full edition routes to clavenar-hil
 # for the same flow.
 review contains msg if {
 	input.tool_type == "wire_transfer"

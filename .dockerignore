@@ -10,7 +10,7 @@ tests/
 *.db-journal
 *.db-wal
 *.db-shm
-warden-lite-target/
+clavenar-lite-target/
 .idea/
 .vscode/
 README.md

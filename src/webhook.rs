@@ -57,7 +57,7 @@ pub struct WebhookEvent<'a> {
     /// `observe`. Lets a SIEM correlate `would_deny`/`would_park`
     /// volume with the rollout phase.
     pub mode: &'a str,
-    /// RFC 3339 UTC timestamp. Always emitted by the warden side,
+    /// RFC 3339 UTC timestamp. Always emitted by the clavenar side,
     /// not the receiver, so a downstream sink isn't responsible for
     /// per-event clock skew.
     pub ts: String,

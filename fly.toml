@@ -1,4 +1,4 @@
-# fly.toml — warden-lite deploy template
+# fly.toml — clavenar-lite deploy template
 #
 # `fly launch` will pick this up. Override `app` to your own slug
 # (Fly requires globally-unique app names; this template uses a
@@ -10,7 +10,7 @@
 # enforce + a real ledger before you wire production agents at it
 # — see README "Promoting to production".
 
-app = "warden-lite"
+app = "clavenar-lite"
 primary_region = "iad"
 kill_signal = "SIGTERM"
 kill_timeout = "15s"
@@ -21,12 +21,12 @@ dockerfile = "Dockerfile"
 [env]
 # Start partners off in observe so the first request through the
 # proxy doesn't 403 and burn the demo. Flip to enforce via
-# `fly secrets set WARDEN_LITE_MODE=enforce` once the verdicts
+# `fly secrets set CLAVENAR_LITE_MODE=enforce` once the verdicts
 # are trustworthy.
-WARDEN_LITE_MODE = "observe"
+CLAVENAR_LITE_MODE = "observe"
 # Point at OpenAI by default so a copy-paste fly launch yields a
 # working LLM proxy. Override to your real upstream.
-WARDEN_LITE_UPSTREAM_URL = "https://api.openai.com/v1/chat/completions"
+CLAVENAR_LITE_UPSTREAM_URL = "https://api.openai.com/v1/chat/completions"
 RUST_LOG = "info"
 
 [http_service]

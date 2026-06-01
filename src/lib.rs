@@ -1,7 +1,7 @@
-//! Agent Warden Lite — single-binary OSS edition.
+//! Clavenar Lite — single-binary OSS edition.
 //!
 //! Re-exports the four embedded layers so integration tests (and a
-//! future warden-sdk) can import them as a library:
+//! future clavenar-sdk) can import them as a library:
 //!
 //! * [`heuristics`] — embedded heuristic Brain (Layer 2).
 //! * [`policy`]     — embedded Rego policy engine (Layer 3).
@@ -11,7 +11,7 @@
 //! * [`slack`]      — optional Slack-webhook side-channel for park alerts.
 //! * [`webhook`]    — optional outbound JSON webhook for SIEM / Datadog ingest.
 //!
-//! See `README.md` for what Lite does versus the full Agent Warden
+//! See `README.md` for what Lite does versus the full Clavenar
 //! edition. The short version: Lite is a single binary for developer-
 //! laptop use. Full edition is a multi-service control plane for
 //! production deployments.

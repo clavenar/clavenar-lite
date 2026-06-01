@@ -6,14 +6,14 @@ name: release
 #
 # What this ships:
 #   1. Multi-arch container image (linux/amd64 + linux/arm64) at
-#      ghcr.io/vanteguardlabs/warden-lite:{version} + :latest.
+#      ghcr.io/clavenar/clavenar-lite:{version} + :latest.
 #   2. Static linux-x86_64 binary (musl) as a release asset, for
 #      partners who want the binary outside a container.
 #   3. A GitHub release with the matching CHANGELOG.md section as
 #      the release body.
 #
 # First-time setup: after the first successful release run, flip
-# the GHCR package to public — Settings → Packages → warden-lite →
+# the GHCR package to public — Settings → Packages → clavenar-lite →
 # Change visibility → Public. Otherwise the docker run example in
 # the README requires an auth'd pull.
 
@@ -59,8 +59,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/vanteguardlabs/warden-lite:${{ steps.ver.outputs.version }}
-            ghcr.io/vanteguardlabs/warden-lite:latest
+            ghcr.io/clavenar/clavenar-lite:${{ steps.ver.outputs.version }}
+            ghcr.io/clavenar/clavenar-lite:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -98,7 +98,7 @@ jobs:
       - name: Build static linux-x86_64 binary
         run: |
           cargo build --release --locked --target x86_64-unknown-linux-musl
-          BIN=target/x86_64-unknown-linux-musl/release/warden-lite
+          BIN=target/x86_64-unknown-linux-musl/release/clavenar-lite
           file "$BIN"
           # Sanity: assert it really is static — dynamic libc linkage
           # defeats the entire reason we ship a musl build.
@@ -108,7 +108,7 @@ jobs:
             exit 1
           fi
           VERSION="${{ steps.ver.outputs.version }}"
-          ASSET="warden-lite-${VERSION}-x86_64-linux-musl.tar.gz"
+          ASSET="clavenar-lite-${VERSION}-x86_64-linux-musl.tar.gz"
           tar -czf "$ASSET" -C "$(dirname "$BIN")" "$(basename "$BIN")"
           sha256sum "$ASSET" | tee "${ASSET}.sha256"
           echo "asset=$ASSET" >> "$GITHUB_ENV"
@@ -118,7 +118,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            --title "${GITHUB_REF_NAME} — warden-lite" \
+            --title "${GITHUB_REF_NAME} — clavenar-lite" \
             --notes-file release-notes.md \
             "$asset" \
             "${asset}.sha256"

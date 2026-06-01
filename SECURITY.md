@@ -1,6 +1,6 @@
 # Security Policy
 
-Agent Warden is a security product. We take vulnerability reports seriously
+Clavenar is a security product. We take vulnerability reports seriously
 and aim to acknowledge every report within 72 hours.
 
 ## Reporting a vulnerability
@@ -21,11 +21,11 @@ in your initial email and we will arrange one.
 
 In scope:
 
-- All 17 repositories under `github.com/vanteguardlabs/warden-*`.
+- All 17 repositories under `github.com/clavenar/clavenar-*`.
 - The shipped binaries, container images, helm chart, and SBOMs published
   under those repositories' GitHub releases.
 - The hash chain integrity properties documented in
-  `warden-specs/README.md` and `warden-ledger/README.md`.
+  `clavenar-specs/README.md` and `clavenar-ledger/README.md`.
 - The cross-service wire contracts documented in `CLAUDE.md` (proxy →
   brain / policy / hil / identity, identity → ledger via NATS).
 
@@ -38,8 +38,8 @@ Out of scope:
   `vanteguardlabs.com` unless they enable account compromise.
 - Denial-of-service findings that require resource limits already
   defaulted by the deployment guide.
-- Findings against demo / simulator components (`warden-simulator`,
-  `warden-chaos-monkey`) when run outside a production deployment —
+- Findings against demo / simulator components (`clavenar-simulator`,
+  `clavenar-chaos-monkey`) when run outside a production deployment —
   these tools intentionally expose unauthenticated admin surfaces on
   loopback only.
 

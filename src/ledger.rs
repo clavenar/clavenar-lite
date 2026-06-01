@@ -1,7 +1,7 @@
 //! Embedded forensic ledger (Layer 4, OSS edition).
 //!
 //! Single SQLite file with the same SHA-256 hash chain shape as the full
-//! `warden-ledger`. A chain produced here is byte-compatible with the
+//! `clavenar-ledger`. A chain produced here is byte-compatible with the
 //! full edition's verifier, so an organisation that outgrows Lite can
 //! point the full ledger at the same DB file (or `attach` it) and
 //! continue the chain unbroken.
@@ -38,9 +38,9 @@ pub const GENESIS_PREV_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Lite shares the chain format with the full edition; the constant
-/// is duplicated here (rather than reaching into `warden-ledger`) so
+/// is duplicated here (rather than reaching into `clavenar-ledger`) so
 /// Lite stays a single-binary, no-deps OSS edition. Keep it in sync
-/// with `warden_ledger::CURRENT_CHAIN_VERSION` — the chains are
+/// with `clavenar_ledger::CURRENT_CHAIN_VERSION` — the chains are
 /// wire-compatible by construction.
 pub const CURRENT_CHAIN_VERSION: i64 = 1;
 
@@ -65,7 +65,7 @@ pub struct LedgerEntry {
     /// Defaults to 1 on the wire so legacy shapes still parse.
     #[serde(default = "default_chain_version")]
     pub chain_version: i64,
-    /// Per-request correlation id surfaced in the `X-Warden-Correlation-Id`
+    /// Per-request correlation id surfaced in the `X-Clavenar-Correlation-Id`
     /// response header. Deliberately NOT part of {@link HashableEntryV1} —
     /// it's audit-trail metadata, not a forensic-chain invariant — so adding
     /// it leaves the chain byte-compatible with the full edition's verifier.
@@ -88,7 +88,7 @@ pub struct LogRequest {
     pub correlation_id: Option<String>,
 }
 
-/// V1 hash input. Identical layout to `warden_ledger::HashableEntryV1`
+/// V1 hash input. Identical layout to `clavenar_ledger::HashableEntryV1`
 /// so a chain produced by Lite verifies under the full edition.
 /// **Do not edit** — bump `CURRENT_CHAIN_VERSION` and add a
 /// `HashableEntryV2<'a>` instead.
@@ -142,7 +142,7 @@ pub struct Pending {
     /// fire-and-forget `POST {url}` with the decision body on
     /// `decide_pending`, so the SDK doesn't have to poll. URLs are
     /// supplied by the agent at park time via the
-    /// `X-Warden-Callback-URL` header and are validated against the
+    /// `X-Clavenar-Callback-URL` header and are validated against the
     /// configured allowlist before being stored.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub callback_url: Option<String>,
@@ -223,7 +223,7 @@ impl Ledger {
     /// run an in-memory DB for tests. Creates the schema on first use.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
-        // WAL lets a second process (the `warden-lite audit` CLI) read
+        // WAL lets a second process (the `clavenar-lite audit` CLI) read
         // the DB while the proxy holds the writer lock; rollback-journal
         // mode would block both. busy_timeout backstops contention with
         // a short wait instead of an immediate SQLITE_BUSY. The `:memory:`
@@ -268,7 +268,7 @@ impl Ledger {
     /// Append one entry. Reads the latest seq + entry_hash, computes the
     /// new hash over the canonical body, inserts the row, returns the
     /// fully-populated entry. Same algorithm as
-    /// `warden_ledger::append_entry`.
+    /// `clavenar_ledger::append_entry`.
     pub async fn append(&self, req: LogRequest) -> rusqlite::Result<LedgerEntry> {
         let conn = self.conn.lock().await;
 

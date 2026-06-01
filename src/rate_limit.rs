@@ -7,9 +7,9 @@
 //! audit chain sees the throttle alongside Allow / Deny / Park.
 //!
 //! Lite is per-agent only — multi-tenant scoping is a full-stack
-//! `warden-proxy` feature (it has SVID URIs to derive the tenant
+//! `clavenar-proxy` feature (it has SVID URIs to derive the tenant
 //! segment from). For Lite, "per-agent" is the right axis because
-//! `WARDEN_LITE_AGENTS` already partitions traffic by token.
+//! `CLAVENAR_LITE_AGENTS` already partitions traffic by token.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

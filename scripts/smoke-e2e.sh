@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# End-to-end smoke: boot warden-lite from the published image, run the
+# End-to-end smoke: boot clavenar-lite from the published image, run the
 # full three-verdict round-trip + the yellow-tier park-poll-decide loop
 # against it, verify the ledger captures the calls, then tear down. The
 # script a partner runs on their own host after `docker pull` to confirm
@@ -11,19 +11,19 @@
 #
 # Usage:
 #   scripts/smoke-e2e.sh                   # use :latest (or pin via env)
-#   WARDEN_LITE_VERSION=0.4.0 scripts/smoke-e2e.sh
+#   CLAVENAR_LITE_VERSION=0.4.0 scripts/smoke-e2e.sh
 #
 # Requires: docker. No host-side curl/jq — everything runs inside
 # containers on a dedicated bridge network, cleaned up on exit.
 
 set -euo pipefail
 
-VERSION="${WARDEN_LITE_VERSION:-latest}"
-NET="warden-smoke-net"
-LITE="warden-smoke-lite"
-STUB="warden-smoke-stub"
-HOST_PORT="${WARDEN_LITE_SMOKE_PORT:-18088}"
-STUB_HOST_PORT="${WARDEN_LITE_SMOKE_STUB_PORT:-19001}"
+VERSION="${CLAVENAR_LITE_VERSION:-latest}"
+NET="clavenar-smoke-net"
+LITE="clavenar-smoke-lite"
+STUB="clavenar-smoke-stub"
+HOST_PORT="${CLAVENAR_LITE_SMOKE_PORT:-18088}"
+STUB_HOST_PORT="${CLAVENAR_LITE_SMOKE_STUB_PORT:-19001}"
 AGENT_TOKEN="agent-smoke-$$"
 DECIDE_TOKEN="op-smoke-$$"
 
@@ -45,7 +45,7 @@ if ! docker ps >/dev/null 2>&1; then
     fi
 fi
 
-echo "smoke-e2e: warden-lite :$VERSION on host port $HOST_PORT"
+echo "smoke-e2e: clavenar-lite :$VERSION on host port $HOST_PORT"
 echo
 
 # --- setup ------------------------------------------------------------
@@ -54,7 +54,7 @@ cleanup
 "${DOCKER[@]}" network create "$NET" >/dev/null
 
 # Upstream echo stub. Accepts any POST, returns 200 + a sentinel body
-# so the agent-side smoke can assert warden-lite actually forwarded.
+# so the agent-side smoke can assert clavenar-lite actually forwarded.
 "${DOCKER[@]}" run -d --rm --name "$STUB" --network "$NET" \
     -p "$STUB_HOST_PORT:9000" \
     python:3.12-alpine python -c '
@@ -75,14 +75,14 @@ socketserver.TCPServer(("", 9000), H).serve_forever()
 
 "${DOCKER[@]}" run -d --rm --name "$LITE" --network "$NET" \
     -p "$HOST_PORT:8088" \
-    -e "WARDEN_LITE_UPSTREAM_URL=http://$STUB:9000" \
-    -e "WARDEN_LITE_TOKEN=$AGENT_TOKEN" \
-    -e "WARDEN_LITE_DECIDE_TOKEN=$DECIDE_TOKEN" \
-    -e "WARDEN_LITE_LEDGER=/tmp/warden-smoke.db" \
-    -e "WARDEN_LITE_MODE=enforce" \
-    "ghcr.io/vanteguardlabs/warden-lite:$VERSION" >/dev/null
+    -e "CLAVENAR_LITE_UPSTREAM_URL=http://$STUB:9000" \
+    -e "CLAVENAR_LITE_TOKEN=$AGENT_TOKEN" \
+    -e "CLAVENAR_LITE_DECIDE_TOKEN=$DECIDE_TOKEN" \
+    -e "CLAVENAR_LITE_LEDGER=/tmp/clavenar-smoke.db" \
+    -e "CLAVENAR_LITE_MODE=enforce" \
+    "ghcr.io/clavenar/clavenar-lite:$VERSION" >/dev/null
 
-echo "==> waiting for warden-lite to come up"
+echo "==> waiting for clavenar-lite to come up"
 for _ in $(seq 1 40); do
     if curl -sf "http://localhost:$HOST_PORT/" >/dev/null; then
         break
@@ -90,7 +90,7 @@ for _ in $(seq 1 40); do
     sleep 0.25
 done
 if ! curl -sf "http://localhost:$HOST_PORT/" >/dev/null; then
-    echo "fail: warden-lite never returned 200 on /" >&2
+    echo "fail: clavenar-lite never returned 200 on /" >&2
     "${DOCKER[@]}" logs "$LITE" 2>&1 | tail -40
     exit 1
 fi
@@ -98,7 +98,7 @@ fi
 # Upstream stub readiness — python's http.server takes a moment to
 # bind after the container starts. Probe via the host-published port
 # so we use host-side curl rather than depending on what's inside
-# warden-lite's slim image.
+# clavenar-lite's slim image.
 echo "==> waiting for upstream stub to bind"
 for _ in $(seq 1 40); do
     # The stub only handles POST; we just want a TCP-accept signal, so
@@ -161,7 +161,7 @@ echo
 echo "==> 1. green path (benign tool → 200)"
 status=$(mcp_post "search" '{"q":"hello"}')
 check "green-200-status"      [ "$status" = "200" ]
-check "green-correlation-hdr" grep -qi '^x-warden-correlation-id:' "$HEAD"
+check "green-correlation-hdr" grep -qi '^x-clavenar-correlation-id:' "$HEAD"
 check "green-upstream-body"   grep -q '"upstream":"ok"' "$BODY"
 
 # --- 2) RED: sql_execute → 403 ----------------------------------------
@@ -243,8 +243,8 @@ check "decide-agent-token-rejected" [ "$status" = "401" ]
 # --- 7) Audit CLI — concurrent read against the live proxy ----------
 
 echo
-echo "==> 7. warden-lite audit bearer-agent (concurrent read, WAL-enabled)"
-"${DOCKER[@]}" exec "$LITE" warden-lite audit bearer-agent >"$BODY" 2>"$HEAD"
+echo "==> 7. clavenar-lite audit bearer-agent (concurrent read, WAL-enabled)"
+"${DOCKER[@]}" exec "$LITE" clavenar-lite audit bearer-agent >"$BODY" 2>"$HEAD"
 rc=$?
 check "audit-cli-exit-0"       [ "$rc" = "0" ]
 check "audit-cli-has-rows"     grep -qE 'seq=[0-9]+ method=' "$BODY"
@@ -261,8 +261,8 @@ echo "  fail: ${#FAIL[@]}"
 if [ "${#FAIL[@]}" -gt 0 ]; then
     for n in "${FAIL[@]}"; do echo "  - $n"; done
     echo
-    echo "warden-lite logs (tail -40):"
+    echo "clavenar-lite logs (tail -40):"
     "${DOCKER[@]}" logs "$LITE" 2>&1 | tail -40
     exit 1
 fi
-echo "  all checks green for warden-lite :$VERSION"
+echo "  all checks green for clavenar-lite :$VERSION"
