@@ -35,7 +35,7 @@ Out of scope:
   `RUSTSEC` and tracked in the repo's `deny.toml` ignore list with a
   documented reason. Re-reporting these is welcome but not novel.
 - Self-XSS and clickjacking on the marketing site at
-  `vanteguardlabs.com` unless they enable account compromise.
+  `clavenar.com` unless they enable account compromise.
 - Denial-of-service findings that require resource limits already
   defaulted by the deployment guide.
 - Findings against demo / simulator components (`clavenar-simulator`,
