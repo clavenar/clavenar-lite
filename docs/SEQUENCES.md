@@ -1,25 +1,25 @@
-# warden-lite sequence diagrams
+# clavenar-lite sequence diagrams
 
 Five sequence diagrams covering the wire-level behaviour of the
 single-binary OSS edition: boot, the Green-tier `POST /mcp` fast path,
 Yellow-tier park with optional Slack + outbound webhook, operator
-decide + async-HIL callback, and `warden-lite verify` chain-version
+decide + async-HIL callback, and `clavenar-lite verify` chain-version
 dispatch. One flowchart at the end captures the Brain/policy tier
 classification with its `enforce` / `observe` branching.
 
-The wire shapes mirror `warden-proxy` + `warden-ledger` (the full
+The wire shapes mirror `clavenar-proxy` + `clavenar-ledger` (the full
 edition's Layer 1 + Layer 4) but collapse into one process, so the
 diagrams emphasise the boundaries that stay HTTP — the agent, the
 upstream LLM/tool API, the operator, the Slack channel, and the SIEM
 sink — and treat the embedded `heuristics`, `policy`, `ledger`, and
 `rate_limit` modules as in-process actors.
 
-## 1. Boot — `warden-lite start`
+## 1. Boot — `clavenar-lite start`
 
 The startup sequence walks every fail-fast check that lives between
 `main` and the first byte served, in the order they run. A typo in
 `--upstream`, a missing `*.rego` file, a malformed
-`WARDEN_LITE_AGENTS` registry, a callback-allowlist entry that isn't
+`CLAVENAR_LITE_AGENTS` registry, a callback-allowlist entry that isn't
 a URL, or a bad `--webhook-url` all surface as a non-zero exit code
 here — never as a 5xx on the first inbound request.
 
@@ -27,7 +27,7 @@ here — never as a 5xx on the first inbound request.
 sequenceDiagram
     autonumber
     participant Op as Operator shell
-    participant CLI as warden-lite (main)
+    participant CLI as clavenar-lite (main)
     participant URL as reqwest::Url::parse
     participant Policy as PolicyEngine::from_dir
     participant Ledger as Ledger::open
@@ -36,8 +36,8 @@ sequenceDiagram
     participant Prom as PrometheusBuilder
     participant Axum as axum::serve
 
-    Op->>CLI: warden-lite start --upstream URL --policies DIR --ledger PATH ...
-    CLI->>CLI: tracing_subscriber::fmt (JSON if WARDEN_LOG_FORMAT=json)
+    Op->>CLI: clavenar-lite start --upstream URL --policies DIR --ledger PATH ...
+    CLI->>CLI: tracing_subscriber::fmt (JSON if CLAVENAR_LOG_FORMAT=json)
     CLI->>CLI: Cli::parse — flag/env merge via clap
     CLI->>URL: parse(cfg.upstream)
     alt parse error
@@ -72,7 +72,7 @@ sequenceDiagram
     CLI->>State: assemble AppState (policy, ledger, agents, mode, slack, callbacks, webhook, rate_limiter)
     CLI->>Prom: install_recorder
     Prom-->>CLI: PrometheusHandle (single global recorder)
-    CLI->>CLI: describe_counter for warden_lite_inspect_total / verdicts_total / rate_limit_denied_total
+    CLI->>CLI: describe_counter for clavenar_lite_inspect_total / verdicts_total / rate_limit_denied_total
     CLI->>Axum: build_router(state).route(/metrics, prom.render)
     CLI->>CLI: tracing::info — boot banner with mode + upstream + auth posture
     CLI->>Axum: TcpListener::bind(0.0.0.0:port)
@@ -87,8 +87,8 @@ sequenceDiagram
 
 The fast path: an authenticated request whose tool name and payload
 clear both the heuristic Brain and the Rego policy is forwarded
-upstream and the response rides back through with `X-Warden-Mode` +
-`X-Warden-Correlation-Id` stamped. Exactly one ledger row is written
+upstream and the response rides back through with `X-Clavenar-Mode` +
+`X-Clavenar-Correlation-Id` stamped. Exactly one ledger row is written
 per request at this orchestration step — Lite collapses the full
 edition's two-row pattern (proxy + policy emitter) because Brain and
 policy are the same process.
@@ -107,7 +107,7 @@ sequenceDiagram
     participant Upstream
 
     Agent->>Proxy: POST /mcp + Authorization: Bearer <tok> + JSON-RPC body
-    Proxy->>Proxy: warden_lite_inspect_total +1
+    Proxy->>Proxy: clavenar_lite_inspect_total +1
     Proxy->>Proxy: correlation_id = Uuid::new_v4 (minted before any auth check)
     Proxy->>Proxy: AgentRegistry.lookup — constant_time_eq per entry
     alt no registry configured
@@ -115,7 +115,7 @@ sequenceDiagram
     else token matched
         Proxy->>Proxy: agent_id = matched id
     else no match
-        Proxy-->>Agent: 401 + X-Warden-Correlation-Id (no ledger row, no rate-limit hit)
+        Proxy-->>Agent: 401 + X-Clavenar-Correlation-Id (no ledger row, no rate-limit hit)
     end
     opt rate_limiter present
         Proxy->>Rate: check(agent_id)
@@ -142,7 +142,7 @@ sequenceDiagram
     opt webhook_url configured
         Proxy->>Hook: spawn fire_event(event=allow, correlation_id, agent_id, mode, ts)
     end
-    Proxy-->>Agent: upstream status + body + X-Warden-Mode + X-Warden-Correlation-Id
+    Proxy-->>Agent: upstream status + body + X-Clavenar-Mode + X-Clavenar-Correlation-Id
 ```
 
 ## 3. Yellow-tier park — 202 + Slack alert + outbound webhook
@@ -152,7 +152,7 @@ parked. The agent gets a 202 with `{status, correlation_id,
 review_reasons}` immediately; Slack + the SIEM webhook are
 fire-and-forget so the agent never waits on them. In `observe` mode
 the same pipeline falls through to the upstream forward with
-`X-Warden-Would-Pend: true` instead of returning 202.
+`X-Clavenar-Would-Pend: true` instead of returning 202.
 
 ```mermaid
 sequenceDiagram
@@ -190,14 +190,14 @@ sequenceDiagram
             HookJob->>SIEM: POST WebhookEvent JSON (5s timeout)
             SIEM-->>HookJob: 2xx (or warn)
         end
-        Proxy-->>Agent: 202 Accepted + PendingResponse { status:pending, correlation_id, review_reasons } + X-Warden-Correlation-Id
+        Proxy-->>Agent: 202 Accepted + PendingResponse { status:pending, correlation_id, review_reasons } + X-Clavenar-Correlation-Id
     else mode == Observe
         Note over Proxy: park branch skipped — falls through to forward
         Proxy->>Proxy: forward upstream as in Sec 2
         opt webhook_url set
             Proxy->>HookJob: spawn fire_event(event=would_park)
         end
-        Proxy-->>Agent: upstream response + X-Warden-Would-Pend: true + X-Warden-Mode: observe
+        Proxy-->>Agent: upstream response + X-Clavenar-Would-Pend: true + X-Clavenar-Mode: observe
     end
 ```
 
@@ -208,7 +208,7 @@ sits behind a distinct `--decide-token` so an agent bearer can never
 approve its own pendings. The handler writes a second ledger row
 (`PendingApproved` / `PendingDenied`) to close the audit story, fires
 one SIEM `decide_allow`/`decide_deny` event, and — if the agent
-registered an `X-Warden-Callback-URL` at park time — POSTs the
+registered an `X-Clavenar-Callback-URL` at park time — POSTs the
 decision to that URL fire-and-forget so the SDK does not have to
 poll.
 
@@ -228,7 +228,7 @@ sequenceDiagram
     alt decide_token configured
         Proxy->>Proxy: constant_time_eq supplied vs expected
         alt mismatch
-            Proxy-->>Op: 401 + X-Warden-Correlation-Id(decide_corr)
+            Proxy-->>Op: 401 + X-Clavenar-Correlation-Id(decide_corr)
         end
     end
     Proxy->>Proxy: serde_json::from_slice(body) -> DecideRequest (400 on parse fail)
@@ -261,7 +261,7 @@ sequenceDiagram
     Proxy-->>Op: 200 + PendingView (Pending serialised as JSON)
 ```
 
-## 5. `warden-lite verify` — chain walk + version dispatch + exit codes
+## 5. `clavenar-lite verify` — chain walk + version dispatch + exit codes
 
 `verify` is the CI-friendly subcommand: open the SQLite ledger,
 recompute every row's hash through `recompute_for_version`, and
@@ -280,7 +280,7 @@ sequenceDiagram
     participant Rec as recompute_for_version
     participant DB as SQLite (entries table)
 
-    Op->>Main: warden-lite verify --ledger PATH
+    Op->>Main: clavenar-lite verify --ledger PATH
     Main->>LedgerOpen: open(path)
     LedgerOpen->>LedgerOpen: pragma WAL + busy_timeout
     LedgerOpen->>LedgerOpen: init_schema + idempotent ALTERs (chain_version, correlation_id)
@@ -310,7 +310,7 @@ sequenceDiagram
     else first_invalid_seq is Some(seq)
         Main-->>Op: stderr — tamper at seq, N valid before it — exit 2
     else unsupported_chain_version is Some(ver)
-        Main-->>Op: stderr — unsupported chain_version ver — upgrade warden-lite — exit 2
+        Main-->>Op: stderr — unsupported chain_version ver — upgrade clavenar-lite — exit 2
     else
         Main-->>Op: stderr — verifier reported failure with no specific cause — exit 2
     end
@@ -344,14 +344,14 @@ flowchart TD
 
     Red --> ModeR{mode}
     ModeR -->|enforce| R403[403 Forbidden<br/>DenyResponse JSON<br/>webhook event=deny]
-    ModeR -->|observe| RFwd[forward upstream<br/>X-Warden-Would-Deny: true<br/>webhook event=would_deny]
+    ModeR -->|observe| RFwd[forward upstream<br/>X-Clavenar-Would-Deny: true<br/>webhook event=would_deny]
 
     Yellow --> ModeY{mode}
     ModeY -->|enforce| Y202[park_pending<br/>+ spawn Slack<br/>+ webhook event=park<br/>202 Accepted PendingResponse]
-    ModeY -->|observe| YFwd[forward upstream<br/>X-Warden-Would-Pend: true<br/>webhook event=would_park]
+    ModeY -->|observe| YFwd[forward upstream<br/>X-Clavenar-Would-Pend: true<br/>webhook event=would_park]
 
     Green --> GFwd[forward upstream<br/>webhook event=allow]
-    GFwd --> OK[200 OK + upstream body<br/>X-Warden-Mode<br/>X-Warden-Correlation-Id]
+    GFwd --> OK[200 OK + upstream body<br/>X-Clavenar-Mode<br/>X-Clavenar-Correlation-Id]
     RFwd --> OK
     YFwd --> OK
 

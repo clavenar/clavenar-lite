@@ -64,7 +64,7 @@ case "$ONLY" in
         ;;
 esac
 
-echo "smoke-install: warden-lite v$VERSION (paths: $ONLY)"
+echo "smoke-install: clavenar-lite v$VERSION (paths: $ONLY)"
 echo
 
 # Some hosts run docker via sudo (debian user not in docker group);
@@ -105,15 +105,15 @@ test_static_binary() {
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends curl ca-certificates file >/dev/null
         V='$VERSION'
-        URL=\"https://github.com/vanteguardlabs/warden-lite/releases/download/v\${V}/warden-lite-\${V}-x86_64-linux-musl.tar.gz\"
+        URL=\"https://github.com/clavenar/clavenar-lite/releases/download/v\${V}/clavenar-lite-\${V}-x86_64-linux-musl.tar.gz\"
         echo \"GET \$URL\"
         curl -fsSL \"\$URL\" | tar -xz
-        file ./warden-lite | grep -Eq 'statically linked|static-pie linked' || {
+        file ./clavenar-lite | grep -Eq 'statically linked|static-pie linked' || {
             echo 'binary is NOT statically linked — musl build is broken'
-            file ./warden-lite
+            file ./clavenar-lite
             exit 1
         }
-        ./warden-lite --version
+        ./clavenar-lite --version
     "
 }
 
@@ -121,7 +121,7 @@ test_docker_pull() {
     # Mirror the README's `docker run ghcr.io/...` snippet. If the
     # GHCR package is private or the tag is missing, this test fails
     # with a clear error.
-    $DOCKER run --rm "ghcr.io/vanteguardlabs/warden-lite:$VERSION" --version
+    $DOCKER run --rm "ghcr.io/clavenar/clavenar-lite:$VERSION" --version
 }
 
 if [ "$ONLY" = "all" ] || [ "$ONLY" = "binary" ]; then

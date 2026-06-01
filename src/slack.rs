@@ -1,10 +1,10 @@
 //! Optional Slack-incoming-webhook notifications for yellow-tier
 //! parks.
 //!
-//! One-way only: warden-lite POSTs a formatted message to the operator's
+//! One-way only: clavenar-lite POSTs a formatted message to the operator's
 //! webhook URL each time a tool call lands in the pendings table. There
 //! is no return path from Slack — operators decide via the CLI
-//! (`warden-lite pending decide`) or via curl to `/pending/:id/decide`.
+//! (`clavenar-lite pending decide`) or via curl to `/pending/:id/decide`.
 //! A Slack-button approval flow needs the full edition's HIL service.
 //!
 //! Fire-and-forget by design: the `notify_pending_parked` call returns
@@ -29,15 +29,15 @@ pub fn format_pending_message(p: &Pending) -> String {
             .join("\n")
     };
     format!(
-        ":warning: *Agent Warden parked a tool call for review*\n\
+        ":warning: *Clavenar parked a tool call for review*\n\
          \n\
          *Tool:* `{}`\n\
          *Agent:* `{}`\n\
          *Correlation ID:* `{}`\n\
          *Reasons:*\n{}\n\
          \n\
-         Approve: `warden-lite pending decide {} --allow`\n\
-         Deny:    `warden-lite pending decide {} --deny --note \"…\"`",
+         Approve: `clavenar-lite pending decide {} --allow`\n\
+         Deny:    `clavenar-lite pending decide {} --deny --note \"…\"`",
         p.tool_type, p.agent_id, p.correlation_id, reasons, p.correlation_id, p.correlation_id
     )
 }
@@ -102,8 +102,8 @@ mod tests {
         assert!(msg.contains("Wire transfers require human approval."));
         // CLI hints must surface — partners shouldn't have to look up
         // the decide command separately.
-        assert!(msg.contains("warden-lite pending decide abc-123 --allow"));
-        assert!(msg.contains("warden-lite pending decide abc-123 --deny"));
+        assert!(msg.contains("clavenar-lite pending decide abc-123 --allow"));
+        assert!(msg.contains("clavenar-lite pending decide abc-123 --deny"));
     }
 
     #[test]

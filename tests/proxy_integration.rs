@@ -1,7 +1,7 @@
-//! End-to-end integration tests for warden-lite.
+//! End-to-end integration tests for clavenar-lite.
 //!
 //! Each test spawns:
-//!   * a real `warden-lite` `axum::serve` on an ephemeral port,
+//!   * a real `clavenar-lite` `axum::serve` on an ephemeral port,
 //!   * a tiny stub upstream that echoes whatever was POSTed to it,
 //!
 //! and exercises the full pipeline (heuristic Brain → Rego policy →
@@ -16,9 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::{extract::State, routing::post, Router};
-use warden_lite::ledger::Ledger;
-use warden_lite::policy::PolicyEngine;
-use warden_lite::proxy::{build_router, AgentRegistry, AppState, WardenMode};
+use clavenar_lite::ledger::Ledger;
+use clavenar_lite::policy::PolicyEngine;
+use clavenar_lite::proxy::{build_router, AgentRegistry, AppState, ClavenarMode};
 
 fn policies_dir() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -56,20 +56,20 @@ async fn spawn_stub_upstream() -> SocketAddr {
     addr
 }
 
-/// Stand up a warden-lite proxy on an ephemeral port pointing at
-/// `upstream_url`. Returns the warden-lite addr + a handle to the
+/// Stand up a clavenar-lite proxy on an ephemeral port pointing at
+/// `upstream_url`. Returns the clavenar-lite addr + a handle to the
 /// embedded ledger so tests can assert what got written.
 async fn spawn_lite(
     upstream_url: String,
     bearer_token: Option<String>,
 ) -> (SocketAddr, Arc<Ledger>) {
-    spawn_lite_full(upstream_url, bearer_token, None, WardenMode::Enforce).await
+    spawn_lite_full(upstream_url, bearer_token, None, ClavenarMode::Enforce).await
 }
 
 async fn spawn_lite_with_mode(
     upstream_url: String,
     bearer_token: Option<String>,
-    mode: WardenMode,
+    mode: ClavenarMode,
 ) -> (SocketAddr, Arc<Ledger>) {
     spawn_lite_full(upstream_url, bearer_token, None, mode).await
 }
@@ -82,7 +82,7 @@ async fn spawn_lite_with_decide_token(
         upstream_url,
         None,
         Some(decide_token),
-        WardenMode::Enforce,
+        ClavenarMode::Enforce,
     )
     .await
 }
@@ -91,7 +91,7 @@ async fn spawn_lite_full(
     upstream_url: String,
     bearer_token: Option<String>,
     decide_token: Option<String>,
-    mode: WardenMode,
+    mode: ClavenarMode,
 ) -> (SocketAddr, Arc<Ledger>) {
     spawn_lite_with_slack(upstream_url, bearer_token, decide_token, mode, None).await
 }
@@ -100,7 +100,7 @@ async fn spawn_lite_with_slack(
     upstream_url: String,
     bearer_token: Option<String>,
     decide_token: Option<String>,
-    mode: WardenMode,
+    mode: ClavenarMode,
     slack_webhook_url: Option<String>,
 ) -> (SocketAddr, Arc<Ledger>) {
     let policy = Arc::new(PolicyEngine::from_dir(&policies_dir(), 60).unwrap());
@@ -151,7 +151,7 @@ async fn park_wire_transfer(lite_addr: SocketAddr) -> String {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 202);
     resp.headers()
-        .get("x-warden-correlation-id")
+        .get("x-clavenar-correlation-id")
         .unwrap()
         .to_str()
         .unwrap()
@@ -221,13 +221,13 @@ async fn injection_blocked_with_403_and_logged() {
 
 #[tokio::test]
 async fn observe_mode_forwards_what_enforce_would_deny() {
-    // Same payload that 403'd above, but warden-lite is in observe
+    // Same payload that 403'd above, but clavenar-lite is in observe
     // mode: response is the upstream's 200, ledger still records the
-    // would-have-denied verdict, and the X-Warden-Would-Deny header
+    // would-have-denied verdict, and the X-Clavenar-Would-Deny header
     // tells the partner what enforce mode would have done.
     let upstream = spawn_stub_upstream().await;
     let (lite_addr, ledger) =
-        spawn_lite_with_mode(format!("http://{}/mcp", upstream), None, WardenMode::Observe).await;
+        spawn_lite_with_mode(format!("http://{}/mcp", upstream), None, ClavenarMode::Observe).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -246,12 +246,12 @@ async fn observe_mode_forwards_what_enforce_would_deny() {
 
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(
-        resp.headers().get("x-warden-mode").unwrap().to_str().unwrap(),
+        resp.headers().get("x-clavenar-mode").unwrap().to_str().unwrap(),
         "observe"
     );
     assert_eq!(
         resp.headers()
-            .get("x-warden-would-deny")
+            .get("x-clavenar-would-deny")
             .unwrap()
             .to_str()
             .unwrap(),
@@ -272,7 +272,7 @@ async fn observe_mode_does_not_set_would_deny_for_allowed_requests() {
     // boolean flag for "this would have been blocked."
     let upstream = spawn_stub_upstream().await;
     let (lite_addr, _ledger) =
-        spawn_lite_with_mode(format!("http://{}/mcp", upstream), None, WardenMode::Observe).await;
+        spawn_lite_with_mode(format!("http://{}/mcp", upstream), None, ClavenarMode::Observe).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -288,17 +288,17 @@ async fn observe_mode_does_not_set_would_deny_for_allowed_requests() {
 
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(
-        resp.headers().get("x-warden-mode").unwrap().to_str().unwrap(),
+        resp.headers().get("x-clavenar-mode").unwrap().to_str().unwrap(),
         "observe"
     );
-    assert!(resp.headers().get("x-warden-would-deny").is_none());
+    assert!(resp.headers().get("x-clavenar-would-deny").is_none());
 }
 
 #[tokio::test]
 async fn correlation_id_round_trips_to_ledger_row() {
     // Allowed request: header should match the ledger row's
     // correlation_id column. This is the lookup that lets a partner
-    // turn a WardenDenied.correlationId on the SDK side into a
+    // turn a ClavenarDenied.correlationId on the SDK side into a
     // specific row in the audit ledger.
     let upstream = spawn_stub_upstream().await;
     let (lite_addr, ledger) =
@@ -319,8 +319,8 @@ async fn correlation_id_round_trips_to_ledger_row() {
     assert_eq!(resp.status().as_u16(), 200);
     let header_id = resp
         .headers()
-        .get("x-warden-correlation-id")
-        .expect("X-Warden-Correlation-Id must be present on every /mcp response")
+        .get("x-clavenar-correlation-id")
+        .expect("X-Clavenar-Correlation-Id must be present on every /mcp response")
         .to_str()
         .unwrap()
         .to_string();
@@ -335,7 +335,7 @@ async fn correlation_id_round_trips_to_ledger_row() {
 #[tokio::test]
 async fn correlation_id_present_on_403_deny() {
     // Denied requests must surface a correlation id too — partners
-    // catch WardenDenied SDK-side and use the correlation id to find
+    // catch ClavenarDenied SDK-side and use the correlation id to find
     // the matching ledger row. The header must be on the 403, not
     // just on success paths.
     let upstream = spawn_stub_upstream().await;
@@ -360,7 +360,7 @@ async fn correlation_id_present_on_403_deny() {
     assert_eq!(resp.status().as_u16(), 403);
     let header_id = resp
         .headers()
-        .get("x-warden-correlation-id")
+        .get("x-clavenar-correlation-id")
         .expect("403 must still carry a correlation id")
         .to_str()
         .unwrap()
@@ -393,7 +393,7 @@ async fn correlation_id_present_on_401_auth_fail() {
 
     assert_eq!(resp.status().as_u16(), 401);
     assert!(
-        resp.headers().get("x-warden-correlation-id").is_some(),
+        resp.headers().get("x-clavenar-correlation-id").is_some(),
         "401 responses must carry a correlation id for access-log tracing",
     );
 }
@@ -440,7 +440,7 @@ async fn wire_transfer_parks_for_review_with_202() {
     // parks the request in `pendings`, returns 202 with the
     // correlation id, and writes a ledger row with
     // intent_category=PendingReview, authorized=false. The full
-    // edition routes this same condition to warden-hil; the
+    // edition routes this same condition to clavenar-hil; the
     // SDK-visible shape is identical.
     let upstream = spawn_stub_upstream().await;
     let (lite_addr, ledger) =
@@ -464,7 +464,7 @@ async fn wire_transfer_parks_for_review_with_202() {
     assert_eq!(resp.status().as_u16(), 202);
     let header_id = resp
         .headers()
-        .get("x-warden-correlation-id")
+        .get("x-clavenar-correlation-id")
         .expect("202 must carry a correlation id")
         .to_str()
         .unwrap()
@@ -499,14 +499,14 @@ async fn wire_transfer_parks_for_review_with_202() {
 async fn observe_mode_yellow_tier_forwards_with_would_pend_header() {
     // Same wire_transfer payload, observe mode: response is the
     // upstream's 200, no row in pendings (no one will approve in
-    // observe), but X-Warden-Would-Pend=true lets the partner count
+    // observe), but X-Clavenar-Would-Pend=true lets the partner count
     // would-have-parked requests during rollout. Ledger still records
     // intent=PendingReview, authorized=false.
     let upstream = spawn_stub_upstream().await;
     let (lite_addr, ledger) = spawn_lite_with_mode(
         format!("http://{}/mcp", upstream),
         None,
-        WardenMode::Observe,
+        ClavenarMode::Observe,
     )
     .await;
 
@@ -528,17 +528,17 @@ async fn observe_mode_yellow_tier_forwards_with_would_pend_header() {
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(
         resp.headers()
-            .get("x-warden-would-pend")
+            .get("x-clavenar-would-pend")
             .unwrap()
             .to_str()
             .unwrap(),
         "true"
     );
-    assert!(resp.headers().get("x-warden-would-deny").is_none());
+    assert!(resp.headers().get("x-clavenar-would-deny").is_none());
 
     let header_id = resp
         .headers()
-        .get("x-warden-correlation-id")
+        .get("x-clavenar-correlation-id")
         .unwrap()
         .to_str()
         .unwrap()
@@ -880,7 +880,7 @@ async fn poll_requires_bearer_token_when_configured() {
     assert_eq!(park.status().as_u16(), 202);
     let corr = park
         .headers()
-        .get("x-warden-correlation-id")
+        .get("x-clavenar-correlation-id")
         .unwrap()
         .to_str()
         .unwrap()
@@ -1166,7 +1166,7 @@ async fn slack_webhook_fires_on_yellow_tier_park() {
         format!("http://{}/mcp", upstream),
         None,
         None,
-        WardenMode::Enforce,
+        ClavenarMode::Enforce,
         Some(format!("http://{}/webhook", slack_addr)),
     )
     .await;
@@ -1183,19 +1183,19 @@ async fn slack_webhook_fires_on_yellow_tier_park() {
     let text = body["text"].as_str().unwrap();
     assert!(text.contains(&corr));
     assert!(text.contains("wire_transfer"));
-    assert!(text.contains("warden-lite pending decide"));
+    assert!(text.contains("clavenar-lite pending decide"));
 }
 
 #[tokio::test]
 async fn slack_webhook_off_when_not_configured() {
     let upstream = spawn_stub_upstream().await;
     let (slack_addr, captured) = spawn_stub_slack().await;
-    // Note: webhook is reachable but warden-lite is configured with None.
+    // Note: webhook is reachable but clavenar-lite is configured with None.
     let (lite_addr, _ledger) = spawn_lite_with_slack(
         format!("http://{}/mcp", upstream),
         None,
         None,
-        WardenMode::Enforce,
+        ClavenarMode::Enforce,
         None,
     )
     .await;
@@ -1217,7 +1217,7 @@ async fn slack_webhook_failure_does_not_break_park() {
         format!("http://{}/mcp", upstream),
         None,
         None,
-        WardenMode::Enforce,
+        ClavenarMode::Enforce,
         Some(bad_webhook),
     )
     .await;
@@ -1257,7 +1257,7 @@ async fn spawn_lite_with_registry(
         agents: Some(registry),
         decide_token: None,
         upstream_api_key: None,
-        mode: WardenMode::Enforce,
+        mode: ClavenarMode::Enforce,
         slack_webhook_url: None,
         callback_allowlist: Vec::new(),
         webhook_url: None,
@@ -1345,7 +1345,7 @@ async fn spawn_lite_with_callbacks(
         agents: None,
         decide_token: None,
         upstream_api_key: None,
-        mode: WardenMode::Enforce,
+        mode: ClavenarMode::Enforce,
         slack_webhook_url: None,
         callback_allowlist: allowlist,
         webhook_url: None,
@@ -1393,7 +1393,7 @@ async fn callback_url_rejected_when_no_allowlist_configured() {
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
-        .header("X-Warden-Callback-URL", "https://x.example.com/cb")
+        .header("X-Clavenar-Callback-URL", "https://x.example.com/cb")
         .json(&serde_json::json!({
             "method": "call_tool",
             "params": { "name": "ping" }
@@ -1417,7 +1417,7 @@ async fn callback_url_rejected_when_off_allowlist() {
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
-        .header("X-Warden-Callback-URL", "https://evil.example.com/cb")
+        .header("X-Clavenar-Callback-URL", "https://evil.example.com/cb")
         .json(&serde_json::json!({
             "method": "call_tool",
             "params": { "name": "ping" }
@@ -1442,7 +1442,7 @@ async fn callback_url_fires_on_decide() {
     // Park a wire_transfer (Yellow tier) with a callback URL.
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
-        .header("X-Warden-Callback-URL", &cb_url)
+        .header("X-Clavenar-Callback-URL", &cb_url)
         .json(&serde_json::json!({
             "method": "call_tool",
             "params": {
@@ -1487,7 +1487,7 @@ async fn callback_url_fires_on_decide() {
 async fn spawn_lite_with_webhook(
     upstream_url: String,
     webhook_url: String,
-    mode: WardenMode,
+    mode: ClavenarMode,
 ) -> (SocketAddr, Arc<Ledger>) {
     let policy = Arc::new(PolicyEngine::from_dir(&policies_dir(), 60).unwrap());
     let ledger = Arc::new(Ledger::open(":memory:").unwrap());
@@ -1541,7 +1541,7 @@ async fn webhook_fires_allow_event_on_green_tier() {
     let (lite_addr, _ledger) = spawn_lite_with_webhook(
         format!("http://{}/mcp", upstream),
         format!("http://{}/callback", sink_addr),
-        WardenMode::Enforce,
+        ClavenarMode::Enforce,
     )
     .await;
 
@@ -1571,7 +1571,7 @@ async fn webhook_fires_deny_event_on_red_tier() {
     let (lite_addr, _ledger) = spawn_lite_with_webhook(
         format!("http://{}/mcp", upstream),
         format!("http://{}/callback", sink_addr),
-        WardenMode::Enforce,
+        ClavenarMode::Enforce,
     )
     .await;
 
@@ -1602,7 +1602,7 @@ async fn webhook_fires_park_then_decide_event_for_yellow_tier() {
     let (lite_addr, _ledger) = spawn_lite_with_webhook(
         format!("http://{}/mcp", upstream),
         format!("http://{}/callback", sink_addr),
-        WardenMode::Enforce,
+        ClavenarMode::Enforce,
     )
     .await;
 
@@ -1650,7 +1650,7 @@ async fn webhook_fires_would_deny_in_observe_mode() {
     let (lite_addr, _ledger) = spawn_lite_with_webhook(
         format!("http://{}/mcp", upstream),
         format!("http://{}/callback", sink_addr),
-        WardenMode::Observe,
+        ClavenarMode::Observe,
     )
     .await;
 
@@ -1672,7 +1672,7 @@ async fn webhook_fires_would_deny_in_observe_mode() {
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(
         resp.headers()
-            .get("X-Warden-Would-Deny")
+            .get("X-Clavenar-Would-Deny")
             .map(|v| v.to_str().unwrap()),
         Some("true")
     );
@@ -1684,7 +1684,7 @@ async fn webhook_fires_would_deny_in_observe_mode() {
 
 #[tokio::test]
 async fn rate_limit_gate_emits_429_with_json_body_and_ledger_row() {
-    use warden_lite::rate_limit::{RateLimitConfig, RateLimiter};
+    use clavenar_lite::rate_limit::{RateLimitConfig, RateLimiter};
     let upstream = spawn_stub_upstream().await;
 
     // Hand-build AppState so we can inject a tight per-agent limiter
@@ -1707,7 +1707,7 @@ async fn rate_limit_gate_emits_429_with_json_body_and_ledger_row() {
         agents,
         decide_token: None,
         upstream_api_key: None,
-        mode: WardenMode::Enforce,
+        mode: ClavenarMode::Enforce,
         slack_webhook_url: None,
         callback_allowlist: Vec::new(),
         webhook_url: None,

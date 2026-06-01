@@ -14,15 +14,15 @@
 //!    policy decision lives in the same process).
 //!
 //! This is the security-first orchestration model from the full
-//! `warden-proxy` (post-2026-05-02). There's no race, no Yellow-tier
+//! `clavenar-proxy` (post-2026-05-02). There's no race, no Yellow-tier
 //! HIL roundtrip, and no Vault — Lite is for developer-laptop use
 //! where the agent already has its own creds.
 //!
 //! # Authentication
 //!
 //! Lite supports an optional bearer-token auth pre-shared via
-//! `WARDEN_LITE_TOKEN` or — for multi-agent deployments — an explicit
-//! `WARDEN_LITE_AGENTS` registry mapping tokens to agent ids. If
+//! `CLAVENAR_LITE_TOKEN` or — for multi-agent deployments — an explicit
+//! `CLAVENAR_LITE_AGENTS` registry mapping tokens to agent ids. If
 //! neither is configured, the proxy accepts every connection (fine
 //! for `127.0.0.1` developer use). If either is configured, every
 //! request must send `Authorization: Bearer <token>` or it's 401.
@@ -30,7 +30,7 @@
 //!
 //! ## Multi-agent
 //!
-//! `WARDEN_LITE_AGENTS=agent-a:tok-a,agent-b:tok-b` registers two
+//! `CLAVENAR_LITE_AGENTS=agent-a:tok-a,agent-b:tok-b` registers two
 //! distinct agents behind the same proxy. The token that matched
 //! determines the `agent_id` recorded on the ledger entry and surfaced
 //! to the policy engine — Rego rules can branch on `input.agent_id`
@@ -58,18 +58,18 @@ use crate::policy::{AgentHistory, PolicyDecision, PolicyEngine, PolicyInput};
 use crate::rate_limit::{RateLimitOutcome, RateLimiter};
 use crate::webhook::{self, WebhookEvent};
 
-const CORRELATION_HEADER: &str = "X-Warden-Correlation-Id";
+const CORRELATION_HEADER: &str = "X-Clavenar-Correlation-Id";
 
-/// Stamp the standard warden response headers on a response.
+/// Stamp the standard clavenar response headers on a response.
 /// `correlation_id` is included unconditionally — even auth-fail and
 /// parse-error responses get one, so partners can trace rejected
 /// attempts through the access log. `mode` is the current
-/// {@link WardenMode}; `would_deny` / `would_pend` only matter in
+/// {@link ClavenarMode}; `would_deny` / `would_pend` only matter in
 /// observe (in enforce mode the pipeline already short-circuited with
 /// a 403 or 202 before this header would have meaning).
-fn warden_headers(
+fn clavenar_headers(
     correlation_id: &str,
-    mode: WardenMode,
+    mode: ClavenarMode,
     would_deny: bool,
     would_pend: bool,
 ) -> HeaderMap {
@@ -79,18 +79,18 @@ fn warden_headers(
         correlation_id.parse().expect("uuid is ascii"),
     );
     h.insert(
-        "X-Warden-Mode",
+        "X-Clavenar-Mode",
         mode.as_str().parse().expect("mode is ascii"),
     );
     if would_deny {
         h.insert(
-            "X-Warden-Would-Deny",
+            "X-Clavenar-Would-Deny",
             "true".parse().expect("static ascii"),
         );
     }
     if would_pend {
         h.insert(
-            "X-Warden-Would-Pend",
+            "X-Clavenar-Would-Pend",
             "true".parse().expect("static ascii"),
         );
     }
@@ -100,22 +100,22 @@ fn warden_headers(
 /// Enforcement posture. `Enforce` is the default and returns 403 on a
 /// would-deny; `Observe` is the rollout knob — every request forwards
 /// upstream regardless of the security pipeline's verdict, and the
-/// response carries `X-Warden-Would-Deny: true` for partners who want
+/// response carries `X-Clavenar-Would-Deny: true` for partners who want
 /// to count would-have-denies before they flip enforcement on. The
 /// ledger entry is unaffected: `authorized=false` still gets written
 /// for a would-deny in observe mode, so the audit trail of what the
 /// pipeline *would* have done stays accurate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WardenMode {
+pub enum ClavenarMode {
     Enforce,
     Observe,
 }
 
-impl WardenMode {
+impl ClavenarMode {
     fn as_str(self) -> &'static str {
         match self {
-            WardenMode::Enforce => "enforce",
-            WardenMode::Observe => "observe",
+            ClavenarMode::Enforce => "enforce",
+            ClavenarMode::Observe => "observe",
         }
     }
 }
@@ -123,9 +123,9 @@ impl WardenMode {
 /// Maps a bearer token to a per-agent identity. `None` in
 /// `AppState.agents` means inbound auth is disabled entirely (every
 /// request is treated as `agent_id="anonymous"`); a single-entry
-/// registry built from `WARDEN_LITE_TOKEN` keeps the v0.x
+/// registry built from `CLAVENAR_LITE_TOKEN` keeps the v0.x
 /// single-agent default of `agent_id="bearer-agent"`; a multi-entry
-/// registry built from `WARDEN_LITE_AGENTS` gives each token its own
+/// registry built from `CLAVENAR_LITE_AGENTS` gives each token its own
 /// `agent_id`.
 #[derive(Debug, Clone)]
 pub struct AgentRegistry {
@@ -134,7 +134,7 @@ pub struct AgentRegistry {
 
 impl AgentRegistry {
     /// Build a registry from the v0.x single-token form. Used as the
-    /// fallback when `WARDEN_LITE_AGENTS` is unset but `WARDEN_LITE_TOKEN`
+    /// fallback when `CLAVENAR_LITE_AGENTS` is unset but `CLAVENAR_LITE_TOKEN`
     /// is set — the lone token maps to `agent_id="bearer-agent"`.
     pub fn single(token: String) -> Self {
         let mut by_token = HashMap::new();
@@ -143,7 +143,7 @@ impl AgentRegistry {
     }
 
     /// Build a multi-agent registry from the `id:token,id:token` form
-    /// of `WARDEN_LITE_AGENTS`. Tokens must be unique; agent ids must
+    /// of `CLAVENAR_LITE_AGENTS`. Tokens must be unique; agent ids must
     /// be non-empty and may contain `[A-Za-z0-9_-]`. Duplicate tokens
     /// or malformed entries return `Err` so the binary exits at boot.
     pub fn parse(spec: &str) -> Result<Self, String> {
@@ -239,19 +239,19 @@ pub struct AppState {
     /// edition's Vault credential injection — minus Vault. `None` means
     /// don't inject (the upstream is responsible for its own auth).
     pub upstream_api_key: Option<String>,
-    /// Enforcement posture (see {@link WardenMode}).
-    pub mode: WardenMode,
+    /// Enforcement posture (see {@link ClavenarMode}).
+    pub mode: ClavenarMode,
     /// Optional Slack-incoming-webhook URL. When set, every yellow-tier
     /// park spawns a fire-and-forget POST with a formatted alert. No
-    /// return path — operators decide via `warden-lite pending decide`
+    /// return path — operators decide via `clavenar-lite pending decide`
     /// or curl.
     pub slack_webhook_url: Option<String>,
     /// Async-HIL callback URL allowlist. Each entry is a literal URL
-    /// prefix; an inbound `X-Warden-Callback-URL` header is accepted
+    /// prefix; an inbound `X-Clavenar-Callback-URL` header is accepted
     /// only if it starts with one of these prefixes. Empty list (the
     /// default) means callback URLs are rejected entirely — partners
     /// must poll. The allowlist protects against agents using
-    /// warden-lite as a reflector to ping arbitrary internal URLs.
+    /// clavenar-lite as a reflector to ping arbitrary internal URLs.
     pub callback_allowlist: Vec<String>,
     /// Optional outbound verdict-webhook URL. When set, every terminal
     /// pipeline outcome (allow / deny / park, plus the `would_*`
@@ -262,7 +262,7 @@ pub struct AppState {
     /// JSON for SIEMs.
     pub webhook_url: Option<String>,
     /// Optional per-agent token-bucket rate limiter. `None` when
-    /// `WARDEN_LITE_RATE_LIMIT_QPS` is unset (the default). When set,
+    /// `CLAVENAR_LITE_RATE_LIMIT_QPS` is unset (the default). When set,
     /// the gate runs *before* the brain/policy pipeline so a runaway
     /// agent doesn't burn local work, and a ledger row with
     /// `intent_category="RateLimitDenied"` is emitted so audit shows
@@ -335,7 +335,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // `/` kept as an alias so the fly.toml health check (which
         // targets `/`) continues to pass without a config rev.
         // `/health` + `/readyz` match the cross-service convention
-        // every other warden-* service exposes — kubelet liveness
+        // every other clavenar-* service exposes — kubelet liveness
         // probes target `/health`, readiness probes `/readyz`.
         .route("/", get(health))
         .route("/health", get(health))
@@ -348,13 +348,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 }
 
 async fn health() -> &'static str {
-    "Agent Warden Lite is active."
+    "Clavenar Lite is active."
 }
 
 /// Readiness probe — returns 200 once the in-process ledger + policy
 /// engine are wired (i.e. always, after boot). Same wire shape as the
 /// full-stack services (`{status, checks}`) so a single Helm probe
-/// template parses any warden component. Lite has no external
+/// template parses any clavenar component. Lite has no external
 /// dependency to poll (SQLite is in-process; brain + policy live in
 /// the same binary), so the checks map is intentionally empty.
 async fn readyz() -> (axum::http::StatusCode, axum::Json<ReadinessResponse>) {
@@ -368,8 +368,8 @@ async fn readyz() -> (axum::http::StatusCode, axum::Json<ReadinessResponse>) {
 }
 
 /// Wire shape for `/readyz`. Mirrors the duplicate-on-purpose pattern
-/// in warden-brain, warden-policy-engine, warden-ledger, warden-hil,
-/// and warden-identity — keeping it inline avoids a shared crate for
+/// in clavenar-brain, clavenar-policy-engine, clavenar-ledger, clavenar-hil,
+/// and clavenar-identity — keeping it inline avoids a shared crate for
 /// one tiny struct that almost never changes.
 #[derive(serde::Serialize)]
 struct ReadinessResponse {
@@ -462,7 +462,7 @@ async fn handle_list_pendings(
         if !ok {
             return (
                 StatusCode::UNAUTHORIZED,
-                warden_headers(&corr, state.mode, false, false),
+                clavenar_headers(&corr, state.mode, false, false),
                 "missing or invalid decide token",
             )
                 .into_response();
@@ -476,7 +476,7 @@ async fn handle_list_pendings(
         Some(other) => {
             return (
                 StatusCode::BAD_REQUEST,
-                warden_headers(&corr, state.mode, false, false),
+                clavenar_headers(&corr, state.mode, false, false),
                 format!(
                     "unknown status filter {:?} (want parked|decided|all)",
                     other
@@ -495,7 +495,7 @@ async fn handle_list_pendings(
         Some(other) => {
             return (
                 StatusCode::BAD_REQUEST,
-                warden_headers(&corr, state.mode, false, false),
+                clavenar_headers(&corr, state.mode, false, false),
                 format!("unknown sort {:?} (want oldest|newest)", other),
             )
                 .into_response();
@@ -511,7 +511,7 @@ async fn handle_list_pendings(
             let views: Vec<PendingView> = rows.into_iter().map(PendingView::from).collect();
             (
                 StatusCode::OK,
-                warden_headers(&corr, state.mode, false, false),
+                clavenar_headers(&corr, state.mode, false, false),
                 Json(views),
             )
                 .into_response()
@@ -520,7 +520,7 @@ async fn handle_list_pendings(
             tracing::error!("list_pendings sqlite failure: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                warden_headers(&corr, state.mode, false, false),
+                clavenar_headers(&corr, state.mode, false, false),
                 "internal ledger error",
             )
                 .into_response()
@@ -550,7 +550,7 @@ async fn handle_get_pending(
         if !ok {
             return (
                 StatusCode::UNAUTHORIZED,
-                warden_headers(&poll_corr, state.mode, false, false),
+                clavenar_headers(&poll_corr, state.mode, false, false),
                 "missing or invalid bearer token",
             )
                 .into_response();
@@ -560,13 +560,13 @@ async fn handle_get_pending(
     match state.ledger.get_pending(&id).await {
         Ok(Some(p)) => (
             StatusCode::OK,
-            warden_headers(&poll_corr, state.mode, false, false),
+            clavenar_headers(&poll_corr, state.mode, false, false),
             Json(PendingView::from(p)),
         )
             .into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            warden_headers(&poll_corr, state.mode, false, false),
+            clavenar_headers(&poll_corr, state.mode, false, false),
             format!("no pending with correlation_id {}", id),
         )
             .into_response(),
@@ -574,7 +574,7 @@ async fn handle_get_pending(
             tracing::error!("get_pending sqlite failure: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                warden_headers(&poll_corr, state.mode, false, false),
+                clavenar_headers(&poll_corr, state.mode, false, false),
                 "internal ledger error",
             )
                 .into_response()
@@ -607,7 +607,7 @@ async fn handle_decide_pending(
         if !ok {
             return (
                 StatusCode::UNAUTHORIZED,
-                warden_headers(&decide_corr, state.mode, false, false),
+                clavenar_headers(&decide_corr, state.mode, false, false),
                 "missing or invalid decide token",
             )
                 .into_response();
@@ -619,7 +619,7 @@ async fn handle_decide_pending(
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                warden_headers(&decide_corr, state.mode, false, false),
+                clavenar_headers(&decide_corr, state.mode, false, false),
                 format!("invalid decision body: {}", e),
             )
                 .into_response();
@@ -635,7 +635,7 @@ async fn handle_decide_pending(
         Err(DecideError::NotFound) => {
             return (
                 StatusCode::NOT_FOUND,
-                warden_headers(&decide_corr, state.mode, false, false),
+                clavenar_headers(&decide_corr, state.mode, false, false),
                 format!("no pending with correlation_id {}", id),
             )
                 .into_response();
@@ -643,7 +643,7 @@ async fn handle_decide_pending(
         Err(DecideError::AlreadyDecided) => {
             return (
                 StatusCode::CONFLICT,
-                warden_headers(&decide_corr, state.mode, false, false),
+                clavenar_headers(&decide_corr, state.mode, false, false),
                 "pending already decided",
             )
                 .into_response();
@@ -651,7 +651,7 @@ async fn handle_decide_pending(
         Err(DecideError::InvalidDecision(d)) => {
             return (
                 StatusCode::BAD_REQUEST,
-                warden_headers(&decide_corr, state.mode, false, false),
+                clavenar_headers(&decide_corr, state.mode, false, false),
                 format!(
                     "invalid decision {:?}: expected \"allow\" or \"deny\"",
                     d
@@ -663,7 +663,7 @@ async fn handle_decide_pending(
             tracing::error!("decide_pending sqlite failure: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                warden_headers(&decide_corr, state.mode, false, false),
+                clavenar_headers(&decide_corr, state.mode, false, false),
                 "internal ledger error",
             )
                 .into_response();
@@ -759,7 +759,7 @@ async fn handle_decide_pending(
 
     (
         StatusCode::OK,
-        warden_headers(&decide_corr, state.mode, false, false),
+        clavenar_headers(&decide_corr, state.mode, false, false),
         Json(PendingView::from(decided)),
     )
         .into_response()
@@ -789,9 +789,9 @@ fn format_decide_reasoning(p: &Pending) -> String {
     )
 }
 
-const CALLBACK_HEADER: &str = "X-Warden-Callback-URL";
+const CALLBACK_HEADER: &str = "X-Clavenar-Callback-URL";
 
-/// Validate the inbound `X-Warden-Callback-URL` header against the
+/// Validate the inbound `X-Clavenar-Callback-URL` header against the
 /// configured allowlist. Returns:
 ///
 /// - `Ok(None)` if no header was supplied (the partner is on the
@@ -812,8 +812,8 @@ fn validate_callback_url(
     };
     if state.callback_allowlist.is_empty() {
         return Err(format!(
-            "{} supplied but no allowlist is configured on this warden-lite; \
-             set WARDEN_LITE_CALLBACK_ALLOWLIST to enable async-HIL webhooks",
+            "{} supplied but no allowlist is configured on this clavenar-lite; \
+             set CLAVENAR_LITE_CALLBACK_ALLOWLIST to enable async-HIL webhooks",
             CALLBACK_HEADER
         ));
     }
@@ -908,11 +908,11 @@ async fn handle_mcp(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    metrics::counter!("warden_lite_inspect_total").increment(1);
+    metrics::counter!("clavenar_lite_inspect_total").increment(1);
 
     // Mint the correlation id BEFORE any auth check so every response
     // — including 401s — carries a trace id. Partners filter the
-    // ledger by this id from the X-Warden-Correlation-Id header on
+    // ledger by this id from the X-Clavenar-Correlation-Id header on
     // the throw they catch SDK-side.
     let correlation_id = Uuid::new_v4().to_string();
 
@@ -933,7 +933,7 @@ async fn handle_mcp(
                 None => {
                     return (
                         StatusCode::UNAUTHORIZED,
-                        warden_headers(&correlation_id, state.mode, false, false),
+                        clavenar_headers(&correlation_id, state.mode, false, false),
                         "missing or invalid bearer token",
                     )
                         .into_response();
@@ -955,7 +955,7 @@ async fn handle_mcp(
             retry_after_secs,
         } = limiter.check(&agent_id)
     {
-        metrics::counter!("warden_lite_rate_limit_denied_total").increment(1);
+        metrics::counter!("clavenar_lite_rate_limit_denied_total").increment(1);
         tracing::warn!(
             agent_id = %throttled,
             correlation_id = %correlation_id,
@@ -983,14 +983,14 @@ async fn handle_mcp(
         .to_string();
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            warden_headers(&correlation_id, state.mode, false, false),
+            clavenar_headers(&correlation_id, state.mode, false, false),
             body,
         )
             .into_response();
     }
 
     // Optional async-HIL callback URL. If the agent supplied a
-    // `X-Warden-Callback-URL` header, validate it against the
+    // `X-Clavenar-Callback-URL` header, validate it against the
     // configured allowlist BEFORE doing any pipeline work. Reject
     // with 400 if the URL isn't on the allowlist — fail-loud so the
     // partner can fix their config.
@@ -999,7 +999,7 @@ async fn handle_mcp(
         Err(reason) => {
             return (
                 StatusCode::BAD_REQUEST,
-                warden_headers(&correlation_id, state.mode, false, false),
+                clavenar_headers(&correlation_id, state.mode, false, false),
                 reason,
             )
                 .into_response();
@@ -1014,7 +1014,7 @@ async fn handle_mcp(
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                warden_headers(&correlation_id, state.mode, false, false),
+                clavenar_headers(&correlation_id, state.mode, false, false),
                 format!("invalid JSON-RPC body: {}", e),
             )
                 .into_response();
@@ -1026,7 +1026,7 @@ async fn handle_mcp(
     if parsed.method.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            warden_headers(&correlation_id, state.mode, false, false),
+            clavenar_headers(&correlation_id, state.mode, false, false),
             "method must be a non-empty string",
         )
             .into_response();
@@ -1096,7 +1096,7 @@ async fn handle_mcp(
     let would_pend = matches!(tier, Tier::Yellow);
 
     // -------- Yellow tier: park + 202 (enforce) or forward + flag (observe) --------
-    if would_pend && state.mode == WardenMode::Enforce {
+    if would_pend && state.mode == ClavenarMode::Enforce {
         // Park the request for human review. The operator (Tue's
         // decide endpoint) flips this row; SDK polls (Wed's GET
         // endpoint) to learn the outcome.
@@ -1118,7 +1118,7 @@ async fn handle_mcp(
                 tracing::error!("park_pending failed: {}", e);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    warden_headers(&correlation_id, state.mode, false, false),
+                    clavenar_headers(&correlation_id, state.mode, false, false),
                     "failed to park pending request",
                 )
                     .into_response();
@@ -1159,13 +1159,13 @@ async fn handle_mcp(
         };
         return (
             StatusCode::ACCEPTED,
-            warden_headers(&correlation_id, state.mode, false, false),
+            clavenar_headers(&correlation_id, state.mode, false, false),
             Json(resp),
         )
             .into_response();
     }
 
-    if would_deny && state.mode == WardenMode::Enforce {
+    if would_deny && state.mode == ClavenarMode::Enforce {
         // Combine policy + brain reasons so the agent-side caller sees
         // the full audit string in one place. `review_reasons` is kept
         // separate in the JSON so callers that key on it (e.g., a
@@ -1197,14 +1197,14 @@ async fn handle_mcp(
         };
         return (
             StatusCode::FORBIDDEN,
-            warden_headers(&correlation_id, state.mode, false, false),
+            clavenar_headers(&correlation_id, state.mode, false, false),
             Json(resp),
         )
             .into_response();
     }
     // Observe mode falls through to the upstream forward even when
     // the pipeline would have denied or parked — the partner still
-    // gets a real response, and X-Warden-Would-Deny / X-Warden-Would-Pend
+    // gets a real response, and X-Clavenar-Would-Deny / X-Clavenar-Would-Pend
     // below tell them what enforce mode would have done.
 
     // -------- Forward upstream --------
@@ -1222,7 +1222,7 @@ async fn handle_mcp(
         Err(e) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                warden_headers(&correlation_id, state.mode, would_deny, would_pend),
+                clavenar_headers(&correlation_id, state.mode, would_deny, would_pend),
                 format!("upstream unreachable: {}", e),
             )
                 .into_response();
@@ -1235,7 +1235,7 @@ async fn handle_mcp(
         Err(e) => {
             return (
                 StatusCode::BAD_GATEWAY,
-                warden_headers(&correlation_id, state.mode, would_deny, would_pend),
+                clavenar_headers(&correlation_id, state.mode, would_deny, would_pend),
                 format!("upstream body read error: {}", e),
             )
                 .into_response();
@@ -1274,7 +1274,7 @@ async fn handle_mcp(
     );
     (
         out_status,
-        warden_headers(&correlation_id, state.mode, would_deny, would_pend),
+        clavenar_headers(&correlation_id, state.mode, would_deny, would_pend),
         upstream_body,
     )
         .into_response()
@@ -1417,7 +1417,7 @@ mod tests {
             agents: None,
             decide_token: None,
             upstream_api_key: None,
-            mode: WardenMode::Enforce,
+            mode: ClavenarMode::Enforce,
             slack_webhook_url: None,
             callback_allowlist: Vec::new(),
             webhook_url: None,

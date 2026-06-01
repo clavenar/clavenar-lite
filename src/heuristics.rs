@@ -1,6 +1,6 @@
 //! Embedded heuristic Brain (Layer 2, OSS edition).
 //!
-//! The full Agent Warden edition runs every request through Claude 4.5
+//! The full Clavenar edition runs every request through Claude 4.5
 //! Haiku for semantic intent classification + indirect-injection
 //! detection. Lite has no LLM dependency — we ship a pure-Rust regex /
 //! substring matcher that catches the high-confidence cases (DAN-style
@@ -29,7 +29,7 @@ pub struct HeuristicVerdict {
 }
 
 /// Substring needles that trigger the indirect-injection detector. Same
-/// list as `warden_brain::heuristic_injection`. Lowercased; the matcher
+/// list as `clavenar_brain::heuristic_injection`. Lowercased; the matcher
 /// lowercases the input once before comparing.
 const INJECTION_NEEDLES: &[&str] = &[
     "ignore previous instructions",

@@ -1,13 +1,13 @@
-//! warden-lite — single-binary OSS edition of Agent Warden.
+//! clavenar-lite — single-binary OSS edition of Clavenar.
 //!
 //! ```text
-//! warden-lite start [--port 8088] [--upstream URL] [--policies DIR] [--ledger PATH]
-//! warden-lite verify [--ledger PATH]
-//! warden-lite audit  [--ledger PATH] <agent_id>
+//! clavenar-lite start [--port 8088] [--upstream URL] [--policies DIR] [--ledger PATH]
+//! clavenar-lite verify [--ledger PATH]
+//! clavenar-lite audit  [--ledger PATH] <agent_id>
 //! ```
 //!
-//! All flags fall back to env vars (`WARDEN_LITE_*`) so you can drop a
-//! `.env` next to the binary and just `warden-lite start`. See
+//! All flags fall back to env vars (`CLAVENAR_LITE_*`) so you can drop a
+//! `.env` next to the binary and just `clavenar-lite start`. See
 //! `README.md` for the full env-var matrix.
 
 use clap::{Parser, Subcommand};
@@ -17,19 +17,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
-use warden_lite::ledger::Ledger;
-use warden_lite::policy::PolicyEngine;
-use warden_lite::proxy::{build_router, AgentRegistry, AppState, WardenMode};
+use clavenar_lite::ledger::Ledger;
+use clavenar_lite::policy::PolicyEngine;
+use clavenar_lite::proxy::{build_router, AgentRegistry, AppState, ClavenarMode};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "warden-lite",
-    about = "Agent Warden Community Edition — single-binary OSS proxy.",
+    name = "clavenar-lite",
+    about = "Clavenar Community Edition — single-binary OSS proxy.",
     version,
     long_about = "Embedded heuristic Brain + Rego policy engine + SHA-256 hash-chained SQLite ledger in one binary. \
                   Designed for developer-laptop use. \
                   For production deployments (mTLS, Vault, multi-instance, HIL, semantic LLM-based detection), \
-                  see the full Agent Warden edition."
+                  see the full Clavenar edition."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -38,45 +38,45 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run the warden-lite proxy server.
+    /// Run the clavenar-lite proxy server.
     Start {
-        /// HTTP listen port. Default 8088 (env `WARDEN_LITE_PORT`).
-        #[arg(long, env = "WARDEN_LITE_PORT")]
+        /// HTTP listen port. Default 8088 (env `CLAVENAR_LITE_PORT`).
+        #[arg(long, env = "CLAVENAR_LITE_PORT")]
         port: Option<u16>,
 
         /// Upstream URL the proxy forwards authorized requests to.
-        /// Default `http://localhost:9000/mcp` (env `WARDEN_LITE_UPSTREAM_URL`).
-        #[arg(long, env = "WARDEN_LITE_UPSTREAM_URL")]
+        /// Default `http://localhost:9000/mcp` (env `CLAVENAR_LITE_UPSTREAM_URL`).
+        #[arg(long, env = "CLAVENAR_LITE_UPSTREAM_URL")]
         upstream: Option<String>,
 
         /// Directory containing `*.rego` policy files. Default `./policies`
-        /// (env `WARDEN_LITE_POLICY_DIR`).
-        #[arg(long, env = "WARDEN_LITE_POLICY_DIR")]
+        /// (env `CLAVENAR_LITE_POLICY_DIR`).
+        #[arg(long, env = "CLAVENAR_LITE_POLICY_DIR")]
         policies: Option<PathBuf>,
 
         /// SQLite ledger path. Use `:memory:` for an ephemeral run.
-        /// Default `./warden-lite.db` (env `WARDEN_LITE_LEDGER`).
-        #[arg(long, env = "WARDEN_LITE_LEDGER")]
+        /// Default `./clavenar-lite.db` (env `CLAVENAR_LITE_LEDGER`).
+        #[arg(long, env = "CLAVENAR_LITE_LEDGER")]
         ledger: Option<String>,
 
         /// Velocity-tracker window in seconds. Default 60.
-        #[arg(long, env = "WARDEN_LITE_VELOCITY_WINDOW_SECS")]
+        #[arg(long, env = "CLAVENAR_LITE_VELOCITY_WINDOW_SECS")]
         velocity_window: Option<u64>,
 
         /// Optional bearer token for inbound auth. If set, every
         /// `POST /mcp` must send `Authorization: Bearer <token>`.
-        /// Read from `WARDEN_LITE_TOKEN` if not passed on the CLI.
+        /// Read from `CLAVENAR_LITE_TOKEN` if not passed on the CLI.
         /// Mutually exclusive with `--agents`; the multi-agent
         /// registry takes precedence if both are set.
-        #[arg(long, env = "WARDEN_LITE_TOKEN")]
+        #[arg(long, env = "CLAVENAR_LITE_TOKEN")]
         token: Option<String>,
 
         /// Multi-agent registry. Comma-separated `id:token` pairs;
         /// each token gets its own `agent_id` on the ledger and in
         /// policy input. e.g.
         /// `--agents agent-a:tok-a,agent-b:tok-b`. Env
-        /// `WARDEN_LITE_AGENTS`. Mutually exclusive with `--token`.
-        #[arg(long, env = "WARDEN_LITE_AGENTS")]
+        /// `CLAVENAR_LITE_AGENTS`. Mutually exclusive with `--token`.
+        #[arg(long, env = "CLAVENAR_LITE_AGENTS")]
         agents: Option<String>,
 
         /// Optional bearer token gating `POST /pending/{id}/decide`.
@@ -84,48 +84,48 @@ enum Command {
         /// <token>`. Held separately from `--token` because operator
         /// (approver) capability is strictly higher than agent capability —
         /// reusing the agent's bearer would let the agent approve its own
-        /// pendings. Env `WARDEN_LITE_DECIDE_TOKEN`.
-        #[arg(long, env = "WARDEN_LITE_DECIDE_TOKEN")]
+        /// pendings. Env `CLAVENAR_LITE_DECIDE_TOKEN`.
+        #[arg(long, env = "CLAVENAR_LITE_DECIDE_TOKEN")]
         decide_token: Option<String>,
 
         /// Optional API key forwarded to the upstream as
         /// `Authorization: Bearer <key>`. Use this for OpenAI /
         /// Anthropic / etc. when the agent shouldn't see the key
-        /// directly. Env: `WARDEN_LITE_UPSTREAM_API_KEY`.
-        #[arg(long, env = "WARDEN_LITE_UPSTREAM_API_KEY")]
+        /// directly. Env: `CLAVENAR_LITE_UPSTREAM_API_KEY`.
+        #[arg(long, env = "CLAVENAR_LITE_UPSTREAM_API_KEY")]
         upstream_api_key: Option<String>,
 
         /// Per-request timeout (in seconds) for the upstream forward.
         /// LLM completions can be slow, so the default is generous; set
         /// lower if you want a stalled upstream to surface as a 504 fast.
-        /// Default 120. Env `WARDEN_LITE_UPSTREAM_TIMEOUT_SECS`.
-        #[arg(long, env = "WARDEN_LITE_UPSTREAM_TIMEOUT_SECS")]
+        /// Default 120. Env `CLAVENAR_LITE_UPSTREAM_TIMEOUT_SECS`.
+        #[arg(long, env = "CLAVENAR_LITE_UPSTREAM_TIMEOUT_SECS")]
         upstream_timeout_secs: Option<u64>,
 
         /// Enforcement mode. `enforce` (default) returns 403 on
         /// would-deny; `observe` forwards every request upstream and
-        /// surfaces the would-deny via the `X-Warden-Would-Deny`
+        /// surfaces the would-deny via the `X-Clavenar-Would-Deny`
         /// response header. Use observe for the rollout phase before
-        /// you trust the policies. Env `WARDEN_LITE_MODE`.
-        #[arg(long, env = "WARDEN_LITE_MODE", value_parser = parse_mode)]
-        mode: Option<WardenMode>,
+        /// you trust the policies. Env `CLAVENAR_LITE_MODE`.
+        #[arg(long, env = "CLAVENAR_LITE_MODE", value_parser = parse_mode)]
+        mode: Option<ClavenarMode>,
 
         /// Optional Slack-incoming-webhook URL. When set, every
         /// yellow-tier park fires a one-way alert with the
         /// correlation id, tool, agent, review reasons, and the
-        /// `warden-lite pending decide` command-line. No return path
+        /// `clavenar-lite pending decide` command-line. No return path
         /// — operators decide via CLI or curl. Env
-        /// `WARDEN_LITE_SLACK_WEBHOOK_URL`.
-        #[arg(long, env = "WARDEN_LITE_SLACK_WEBHOOK_URL")]
+        /// `CLAVENAR_LITE_SLACK_WEBHOOK_URL`.
+        #[arg(long, env = "CLAVENAR_LITE_SLACK_WEBHOOK_URL")]
         slack_webhook_url: Option<String>,
 
         /// Async-HIL callback-URL allowlist. Comma-separated literal
-        /// URL prefixes; an inbound `X-Warden-Callback-URL` header is
+        /// URL prefixes; an inbound `X-Clavenar-Callback-URL` header is
         /// accepted only if it starts with one of these. Unset (the
         /// default) means callback URLs are rejected — partners poll.
         /// e.g. `--callback-allowlist https://my-app.example.com/`.
-        /// Env `WARDEN_LITE_CALLBACK_ALLOWLIST`.
-        #[arg(long, env = "WARDEN_LITE_CALLBACK_ALLOWLIST")]
+        /// Env `CLAVENAR_LITE_CALLBACK_ALLOWLIST`.
+        #[arg(long, env = "CLAVENAR_LITE_CALLBACK_ALLOWLIST")]
         callback_allowlist: Option<String>,
 
         /// Outbound verdict-webhook URL. When set, every terminal
@@ -134,8 +134,8 @@ enum Command {
         /// fires a fire-and-forget POST with a stable JSON event
         /// shape. Intended for SIEM / Datadog HTTP / generic webhook
         /// ingest — distinct from `--slack-webhook-url` (Markdown for
-        /// humans). Env `WARDEN_LITE_WEBHOOK_URL`.
-        #[arg(long, env = "WARDEN_LITE_WEBHOOK_URL")]
+        /// humans). Env `CLAVENAR_LITE_WEBHOOK_URL`.
+        #[arg(long, env = "CLAVENAR_LITE_WEBHOOK_URL")]
         webhook_url: Option<String>,
 
         /// Per-agent rate-limit refill rate, requests/second. Default
@@ -144,31 +144,31 @@ enum Command {
         /// limit agent gets HTTP 429 with a JSON body (`error`,
         /// `agent_id`, `retry_after_secs`, `correlation_id`) and a
         /// ledger row with `intent_category="RateLimitDenied"`. Env
-        /// `WARDEN_LITE_RATE_LIMIT_QPS`.
-        #[arg(long, env = "WARDEN_LITE_RATE_LIMIT_QPS")]
+        /// `CLAVENAR_LITE_RATE_LIMIT_QPS`.
+        #[arg(long, env = "CLAVENAR_LITE_RATE_LIMIT_QPS")]
         rate_limit_qps: Option<f64>,
 
         /// Per-agent rate-limit bucket capacity (allows transient
         /// spikes above `--rate-limit-qps`). Defaults to `ceil(qps)`
         /// when unset; ignored when `--rate-limit-qps` is 0. Env
-        /// `WARDEN_LITE_RATE_LIMIT_BURST`.
-        #[arg(long, env = "WARDEN_LITE_RATE_LIMIT_BURST")]
+        /// `CLAVENAR_LITE_RATE_LIMIT_BURST`.
+        #[arg(long, env = "CLAVENAR_LITE_RATE_LIMIT_BURST")]
         rate_limit_burst: Option<u32>,
     },
 
     /// Walk every entry in the ledger and confirm the hash chain is
     /// intact. Exits 0 if valid, 2 if any entry's hash doesn't match.
     Verify {
-        /// SQLite ledger path. Default `./warden-lite.db`.
-        #[arg(long, env = "WARDEN_LITE_LEDGER")]
+        /// SQLite ledger path. Default `./clavenar-lite.db`.
+        #[arg(long, env = "CLAVENAR_LITE_LEDGER")]
         ledger: Option<String>,
     },
 
     /// Print every ledger entry for a given agent_id, oldest first.
     /// Useful for incident review.
     Audit {
-        /// SQLite ledger path. Default `./warden-lite.db`.
-        #[arg(long, env = "WARDEN_LITE_LEDGER")]
+        /// SQLite ledger path. Default `./clavenar-lite.db`.
+        #[arg(long, env = "CLAVENAR_LITE_LEDGER")]
         ledger: Option<String>,
 
         /// The agent_id to audit (matched against the `agent_id` column).
@@ -176,7 +176,7 @@ enum Command {
     },
 
     /// Operator commands for parked tool calls — list, inspect, decide.
-    /// Talks to a running warden-lite over HTTP; not a local-DB
+    /// Talks to a running clavenar-lite over HTTP; not a local-DB
     /// operation. Use against the same `--endpoint` your agent posts to.
     Pending {
         #[command(subcommand)]
@@ -184,14 +184,14 @@ enum Command {
     },
 
     /// Snapshot the ledger DB to a portable file using SQLite's online-
-    /// backup API. Safe to run against a live warden-lite process; the
+    /// backup API. Safe to run against a live clavenar-lite process; the
     /// snapshot is a self-contained SQLite DB that opens with
-    /// `Ledger::open` and verifies clean with `warden-lite verify`.
+    /// `Ledger::open` and verifies clean with `clavenar-lite verify`.
     /// The hash chain is re-verified after the copy completes.
     Backup {
-        /// Source ledger path. Default `./warden-lite.db`. Env
-        /// `WARDEN_LITE_LEDGER`.
-        #[arg(long, env = "WARDEN_LITE_LEDGER")]
+        /// Source ledger path. Default `./clavenar-lite.db`. Env
+        /// `CLAVENAR_LITE_LEDGER`.
+        #[arg(long, env = "CLAVENAR_LITE_LEDGER")]
         ledger: Option<String>,
 
         /// Destination file. Overwritten if it already exists.
@@ -203,15 +203,15 @@ enum Command {
     /// the snapshot BEFORE replacing the target (fail-closed: an
     /// invalid snapshot never lands on disk). Refuses to overwrite an
     /// existing ledger without `--force`. Recommended workflow: stop
-    /// the warden-lite process, restore, restart.
+    /// the clavenar-lite process, restore, restart.
     Restore {
-        /// Snapshot file produced by `warden-lite backup`.
+        /// Snapshot file produced by `clavenar-lite backup`.
         #[arg(long)]
         input: PathBuf,
 
-        /// Target ledger path. Default `./warden-lite.db`. Env
-        /// `WARDEN_LITE_LEDGER`.
-        #[arg(long, env = "WARDEN_LITE_LEDGER")]
+        /// Target ledger path. Default `./clavenar-lite.db`. Env
+        /// `CLAVENAR_LITE_LEDGER`.
+        #[arg(long, env = "CLAVENAR_LITE_LEDGER")]
         ledger: Option<String>,
 
         /// Overwrite an existing target ledger. Without this flag,
@@ -226,12 +226,12 @@ enum Command {
 enum PendingAction {
     /// List parked (or decided, or all) pendings.
     List {
-        /// Warden-lite base URL. Default `http://localhost:8088`.
-        #[arg(long, env = "WARDEN_LITE_URL", default_value = "http://localhost:8088")]
+        /// Clavenar-lite base URL. Default `http://localhost:8088`.
+        #[arg(long, env = "CLAVENAR_LITE_URL", default_value = "http://localhost:8088")]
         endpoint: String,
-        /// Operator bearer token. Required if warden-lite was booted
-        /// with `--decide-token`. Env `WARDEN_LITE_DECIDE_TOKEN`.
-        #[arg(long, env = "WARDEN_LITE_DECIDE_TOKEN")]
+        /// Operator bearer token. Required if clavenar-lite was booted
+        /// with `--decide-token`. Env `CLAVENAR_LITE_DECIDE_TOKEN`.
+        #[arg(long, env = "CLAVENAR_LITE_DECIDE_TOKEN")]
         decide_token: Option<String>,
         /// `parked` (default) | `decided` | `all`.
         #[arg(long, default_value = "parked")]
@@ -252,12 +252,12 @@ enum PendingAction {
     /// Look up one pending by correlation id.
     Get {
         /// Correlation id (returned in the 202 body and the
-        /// `X-Warden-Correlation-Id` header).
+        /// `X-Clavenar-Correlation-Id` header).
         id: String,
-        #[arg(long, env = "WARDEN_LITE_URL", default_value = "http://localhost:8088")]
+        #[arg(long, env = "CLAVENAR_LITE_URL", default_value = "http://localhost:8088")]
         endpoint: String,
-        /// Agent bearer token (poll path). Env `WARDEN_LITE_TOKEN`.
-        #[arg(long, env = "WARDEN_LITE_TOKEN")]
+        /// Agent bearer token (poll path). Env `CLAVENAR_LITE_TOKEN`.
+        #[arg(long, env = "CLAVENAR_LITE_TOKEN")]
         token: Option<String>,
         #[arg(long)]
         json: bool,
@@ -268,9 +268,9 @@ enum PendingAction {
     /// ledger.
     Decide {
         id: String,
-        #[arg(long, env = "WARDEN_LITE_URL", default_value = "http://localhost:8088")]
+        #[arg(long, env = "CLAVENAR_LITE_URL", default_value = "http://localhost:8088")]
         endpoint: String,
-        #[arg(long, env = "WARDEN_LITE_DECIDE_TOKEN")]
+        #[arg(long, env = "CLAVENAR_LITE_DECIDE_TOKEN")]
         decide_token: Option<String>,
         #[arg(long, conflicts_with = "deny")]
         allow: bool,
@@ -284,14 +284,14 @@ enum PendingAction {
 #[tokio::main]
 async fn main() {
     // `RUST_LOG` env var controls level. Default to "info" if unset so
-    // `warden-lite start` shows the boot banner without extra config.
-    // `WARDEN_LOG_FORMAT=json` switches to one structured event per
+    // `clavenar-lite start` shows the boot banner without extra config.
+    // `CLAVENAR_LOG_FORMAT=json` switches to one structured event per
     // line (current span fields + active span stack) — same env knob
-    // every other warden-* service exposes so one log-shipping config
+    // every other clavenar-* service exposes so one log-shipping config
     // ingests any component.
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    match std::env::var("WARDEN_LOG_FORMAT").as_deref() {
+    match std::env::var("CLAVENAR_LOG_FORMAT").as_deref() {
         Ok("json") => tracing_subscriber::fmt()
             .with_env_filter(filter)
             .json()
@@ -324,10 +324,10 @@ async fn main() {
             let port = port.unwrap_or(8088);
             let upstream = upstream.unwrap_or_else(|| "http://localhost:9000/mcp".into());
             let policies = policies.unwrap_or_else(|| PathBuf::from("./policies"));
-            let ledger_path = ledger.unwrap_or_else(|| "./warden-lite.db".into());
+            let ledger_path = ledger.unwrap_or_else(|| "./clavenar-lite.db".into());
             let velocity_window = velocity_window.unwrap_or(60);
             let upstream_timeout = Duration::from_secs(upstream_timeout_secs.unwrap_or(120));
-            let mode = mode.unwrap_or(WardenMode::Enforce);
+            let mode = mode.unwrap_or(ClavenarMode::Enforce);
 
             run_start(StartConfig {
                 port,
@@ -350,20 +350,20 @@ async fn main() {
             .await
         }
         Command::Verify { ledger } => {
-            let path = ledger.unwrap_or_else(|| "./warden-lite.db".into());
+            let path = ledger.unwrap_or_else(|| "./clavenar-lite.db".into());
             run_verify(path).await
         }
         Command::Audit { ledger, agent_id } => {
-            let path = ledger.unwrap_or_else(|| "./warden-lite.db".into());
+            let path = ledger.unwrap_or_else(|| "./clavenar-lite.db".into());
             run_audit(path, agent_id).await
         }
         Command::Pending { action } => run_pending(action).await,
         Command::Backup { ledger, output } => {
-            let path = ledger.unwrap_or_else(|| "./warden-lite.db".into());
+            let path = ledger.unwrap_or_else(|| "./clavenar-lite.db".into());
             run_backup(path, output).await
         }
         Command::Restore { input, ledger, force } => {
-            let path = ledger.unwrap_or_else(|| "./warden-lite.db".into());
+            let path = ledger.unwrap_or_else(|| "./clavenar-lite.db".into());
             run_restore(input, path, force).await
         }
     };
@@ -621,7 +621,7 @@ struct StartConfig {
     decide_token: Option<String>,
     upstream_api_key: Option<String>,
     upstream_timeout: Duration,
-    mode: WardenMode,
+    mode: ClavenarMode,
     slack_webhook_url: Option<String>,
     callback_allowlist: Option<String>,
     webhook_url: Option<String>,
@@ -629,12 +629,12 @@ struct StartConfig {
     rate_limit_burst: Option<u32>,
 }
 
-/// Parse `--mode` / `WARDEN_LITE_MODE` into a {@link WardenMode}.
+/// Parse `--mode` / `CLAVENAR_LITE_MODE` into a {@link ClavenarMode}.
 /// Accepts `enforce` / `observe`, case-insensitive.
-fn parse_mode(s: &str) -> Result<WardenMode, String> {
+fn parse_mode(s: &str) -> Result<ClavenarMode, String> {
     match s.trim().to_ascii_lowercase().as_str() {
-        "enforce" => Ok(WardenMode::Enforce),
-        "observe" => Ok(WardenMode::Observe),
+        "enforce" => Ok(ClavenarMode::Enforce),
+        "observe" => Ok(ClavenarMode::Observe),
         other => Err(format!(
             "invalid mode {:?}: expected 'enforce' or 'observe'",
             other
@@ -743,11 +743,11 @@ async fn run_start(cfg: StartConfig) -> i32 {
     let rate_limiter = {
         let qps = cfg.rate_limit_qps.unwrap_or(0.0).max(0.0);
         let burst = cfg.rate_limit_burst.unwrap_or_else(|| qps.ceil().max(1.0) as u32);
-        let config = warden_lite::rate_limit::RateLimitConfig { qps, burst };
+        let config = clavenar_lite::rate_limit::RateLimitConfig { qps, burst };
         if config.is_enabled() {
             tracing::info!(qps, burst, "rate-limit per-agent enabled");
         }
-        warden_lite::rate_limit::RateLimiter::from_config(config).map(Arc::new)
+        clavenar_lite::rate_limit::RateLimiter::from_config(config).map(Arc::new)
     };
 
     let state = Arc::new(AppState {
@@ -768,9 +768,9 @@ async fn run_start(cfg: StartConfig) -> i32 {
     // Install the Prometheus recorder once before any emit site fires.
     // The handle lives in the `/metrics` closure below; metric facades
     // (`metrics::counter!`, etc.) route to this global recorder
-    // transparently. Same pattern as warden-brain / warden-policy-
-    // engine / warden-ledger / warden-hil / warden-identity, so a
-    // single Prometheus scrape config reads any warden component.
+    // transparently. Same pattern as clavenar-brain / clavenar-policy-
+    // engine / clavenar-ledger / clavenar-hil / clavenar-identity, so a
+    // single Prometheus scrape config reads any clavenar component.
     let prom = match metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder() {
         Ok(h) => h,
         Err(e) => {
@@ -779,15 +779,15 @@ async fn run_start(cfg: StartConfig) -> i32 {
         }
     };
     metrics::describe_counter!(
-        "warden_lite_inspect_total",
+        "clavenar_lite_inspect_total",
         "Total /mcp requests received."
     );
     metrics::describe_counter!(
-        "warden_lite_verdicts_total",
+        "clavenar_lite_verdicts_total",
         "Terminal verdicts. verdict={allow,deny,pending,would_deny,would_pend}; the would_* family fires in observe mode."
     );
     metrics::describe_counter!(
-        "warden_lite_rate_limit_denied_total",
+        "clavenar_lite_rate_limit_denied_total",
         "Requests rejected at /mcp ingress by the per-agent token-bucket rate limiter. \
          Fires before brain/policy work runs; the denial also emits a ledger row \
          with intent_category=\"RateLimitDenied\"."
@@ -803,9 +803,9 @@ async fn run_start(cfg: StartConfig) -> i32 {
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
 
     tracing::info!(
-        "warden-lite listening on http://{} (mode={}, upstream={}, policies={}, ledger={}, auth={}, decide_auth={}, slack_alerts={}, verdict_webhook={}, upstream_timeout={}s)",
+        "clavenar-lite listening on http://{} (mode={}, upstream={}, policies={}, ledger={}, auth={}, decide_auth={}, slack_alerts={}, verdict_webhook={}, upstream_timeout={}s)",
         addr,
-        match cfg.mode { WardenMode::Enforce => "enforce", WardenMode::Observe => "observe" },
+        match cfg.mode { ClavenarMode::Enforce => "enforce", ClavenarMode::Observe => "observe" },
         cfg.upstream,
         cfg.policies.display(),
         cfg.ledger_path,
@@ -961,7 +961,7 @@ async fn run_restore(input: PathBuf, ledger_path: String, force: bool) -> i32 {
         std::path::Path::new(&ledger_path)
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("warden-lite.db")
+            .unwrap_or("clavenar-lite.db")
     ));
 
     if let Err(e) = std::fs::copy(&input_str, &tmp) {
@@ -1036,7 +1036,7 @@ async fn run_verify(ledger_path: String) -> i32 {
                 2
             } else if let Some(ver) = v.unsupported_chain_version {
                 eprintln!(
-                    "ledger {} cannot be fully verified — entry written under chain_version {} which this binary does not know how to verify ({} earlier entries checked OK). Upgrade warden-lite.",
+                    "ledger {} cannot be fully verified — entry written under chain_version {} which this binary does not know how to verify ({} earlier entries checked OK). Upgrade clavenar-lite.",
                     ledger_path, ver, v.entries_checked
                 );
                 2

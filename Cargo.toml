@@ -1,25 +1,25 @@
 [package]
-name = "warden-lite"
+name = "clavenar-lite"
 version = "0.6.0"
 edition = "2024"
-description = "Community Edition of Agent Warden — single-binary OSS proxy with embedded heuristic Brain, Rego policy engine, and SHA-256 hash-chained ledger."
+description = "Community Edition of Clavenar — single-binary OSS proxy with embedded heuristic Brain, Rego policy engine, and SHA-256 hash-chained ledger."
 license = "Apache-2.0"
-repository = "https://github.com/vanteguardlabs/warden-lite"
+repository = "https://github.com/clavenar/clavenar-lite"
 readme = "README.md"
 keywords = ["ai", "agent", "security", "proxy", "policy"]
 categories = ["command-line-utilities", "network-programming"]
 
 [[bin]]
-name = "warden-lite"
+name = "clavenar-lite"
 path = "src/main.rs"
 
 [lib]
-name = "warden_lite"
+name = "clavenar_lite"
 path = "src/lib.rs"
 
 [dependencies]
 # HTTP server + extractors. Same axum/tokio pair as the full edition; keeps
-# the wire shape identical so an agent already pointed at a full warden-proxy
+# the wire shape identical so an agent already pointed at a full clavenar-proxy
 # can be redirected to lite without code changes on the agent side.
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
@@ -35,7 +35,7 @@ regorus = "0.2"
 rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
-# SHA-256 for the hash chain. Same algorithm as warden-ledger so a chain
+# SHA-256 for the hash chain. Same algorithm as clavenar-ledger so a chain
 # produced by lite can be verified by code from the full edition (and vice
 # versa).
 sha2 = "0.10"
@@ -48,10 +48,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 async-trait = "0.1"
 # Prometheus-format `/metrics` endpoint, same crate pair the full
-# edition (warden-proxy, warden-brain, warden-policy-engine,
-# warden-ledger, warden-hil, warden-identity) uses. Keeps scrape
+# edition (clavenar-proxy, clavenar-brain, clavenar-policy-engine,
+# clavenar-ledger, clavenar-hil, clavenar-identity) uses. Keeps scrape
 # tooling identical: one Prometheus + Grafana stack reads any
-# warden component.
+# clavenar component.
 metrics = "0.22"
 metrics-exporter-prometheus = "0.14"
 
