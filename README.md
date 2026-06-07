@@ -186,6 +186,10 @@ clavenar-lite verify [--ledger PATH]
 clavenar-lite audit  [--ledger PATH] <agent_id>
 clavenar-lite backup  [--ledger PATH] --output FILE
 clavenar-lite restore --input FILE [--ledger PATH] [--force]
+clavenar-lite graduate report [--ledger PATH] [--since 24h|RFC3339]
+                            [--signing-key key.pem] [--output FILE]
+                            [--format json|text]
+clavenar-lite graduate verify --report FILE [--pubkey FILE]
 clavenar-lite pending list   [--endpoint URL] [--decide-token TOKEN]
                             [--status parked|decided|all] [--limit N]
                             [--sort oldest|newest] [--json]
@@ -218,6 +222,7 @@ Every flag falls back to a `CLAVENAR_LITE_*` env var:
 | `--webhook-url`            | `CLAVENAR_LITE_WEBHOOK_URL`            | (none — webhook off)      |
 | `--rate-limit-qps`         | `CLAVENAR_LITE_RATE_LIMIT_QPS`         | 0 (rate limit off)        |
 | `--rate-limit-burst`       | `CLAVENAR_LITE_RATE_LIMIT_BURST`       | `ceil(qps)`               |
+| `--signing-key` (graduate) | `CLAVENAR_LITE_SIGNING_KEY_PATH`       | (none — unsigned report)  |
 
 ### Per-agent rate limiting
 
@@ -264,6 +269,33 @@ denied," then flip `CLAVENAR_LITE_MODE=enforce` and pop the gate.
 ```bash
 clavenar-lite start --mode observe --upstream https://api.openai.com/v1
 ```
+
+### Graduation report
+
+Before flipping to enforce, turn the observe-mode ledger into a signed,
+human-readable summary of exactly what enforce *would* have blocked or
+parked. The report is signed with a local Ed25519 key (no online
+service) and embeds its public key so anyone verifies it offline.
+
+```bash
+# One-time: generate a signing key.
+openssl genpkey -algorithm ed25519 -out clavenar-lite.key
+
+# After an observe window:
+clavenar-lite graduate report --signing-key clavenar-lite.key --format text
+#   …prints would-deny / would-pend counts, top offenders, and a
+#   SAFE TO ENFORCE / REVIEW FIRST recommendation.
+
+# Emit + verify the signed JSON artifact (verification is offline):
+clavenar-lite graduate report --signing-key clavenar-lite.key --output report.json
+clavenar-lite graduate verify --report report.json
+```
+
+`graduate report` recommends enforce only when the chain verifies and
+nothing in the window would have been blocked or parked. Without
+`--signing-key` it still prints a summary, just not a tamper-evident one.
+`clavenarctl init --guard --upstream <URL>` scaffolds this whole flow in
+one command.
 
 ## Backup + restore
 
