@@ -10,7 +10,10 @@
 //! `.env` next to the binary and just `clavenar-lite start`. See
 //! `README.md` for the full env-var matrix.
 
+use chrono::Utc;
 use clap::{Parser, Subcommand};
+use ed25519_dalek::SigningKey;
+use ed25519_dalek::pkcs8::DecodePrivateKey;
 use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -220,6 +223,66 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+
+    /// Observe→enforce graduation: summarize what enforce mode WOULD
+    /// have blocked or parked (from the observe-mode ledger) and emit a
+    /// signed, human-readable report. `report` generates; `verify`
+    /// checks a report's signature offline.
+    Graduate {
+        #[command(subcommand)]
+        action: GraduateAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GraduateAction {
+    /// Generate a graduation report from the local ledger.
+    Report {
+        /// SQLite ledger path. Default `./clavenar-lite.db`.
+        #[arg(long, env = "CLAVENAR_LITE_LEDGER")]
+        ledger: Option<String>,
+
+        /// Only summarize rows at or after this instant. Accepts RFC 3339
+        /// (`2026-06-01T00:00:00Z`) or a relative duration (`24h`, `7d`,
+        /// `90m`). Omit to summarize the whole ledger.
+        #[arg(long)]
+        since: Option<String>,
+
+        /// PKCS#8 PEM Ed25519 signing key
+        /// (`openssl genpkey -algorithm ed25519`). When omitted the
+        /// report is emitted UNSIGNED (still useful, just not
+        /// tamper-evident).
+        #[arg(long, env = "CLAVENAR_LITE_SIGNING_KEY_PATH")]
+        signing_key: Option<PathBuf>,
+
+        /// Write the report here instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Output shape: `json` (the signed artifact) or `text` (a human
+        /// summary).
+        #[arg(long, value_enum, default_value_t = ReportFormat::Json)]
+        format: ReportFormat,
+    },
+
+    /// Verify a graduation report's signature offline. Uses the public
+    /// key embedded in the report unless `--pubkey` pins one.
+    Verify {
+        /// Path to a report produced by `graduate report`.
+        #[arg(long)]
+        report: PathBuf,
+
+        /// SPKI PEM public key to verify against, overriding the
+        /// report's embedded `pubkey_pem`.
+        #[arg(long)]
+        pubkey: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum ReportFormat {
+    Json,
+    Text,
 }
 
 #[derive(Subcommand, Debug)]
@@ -366,6 +429,7 @@ async fn main() {
             let path = ledger.unwrap_or_else(|| "./clavenar-lite.db".into());
             run_restore(input, path, force).await
         }
+        Command::Graduate { action } => run_graduate(action).await,
     };
 
     std::process::exit(exit_code);
@@ -1087,6 +1151,230 @@ async fn run_audit(ledger_path: String, agent_id: String) -> i32 {
     }
     println!("\n{} entries for agent_id={}", entries.len(), agent_id);
     0
+}
+
+async fn run_graduate(action: GraduateAction) -> i32 {
+    match action {
+        GraduateAction::Report {
+            ledger,
+            since,
+            signing_key,
+            output,
+            format,
+        } => {
+            let path = ledger.unwrap_or_else(|| "./clavenar-lite.db".into());
+            run_graduate_report(path, since, signing_key, output, format).await
+        }
+        GraduateAction::Verify { report, pubkey } => run_graduate_verify(report, pubkey).await,
+    }
+}
+
+async fn run_graduate_report(
+    ledger_path: String,
+    since: Option<String>,
+    signing_key: Option<PathBuf>,
+    output: Option<PathBuf>,
+    format: ReportFormat,
+) -> i32 {
+    use clavenar_lite::report::{GraduationReport, SignedGraduationReport, sign_report, unsigned_report};
+
+    let since_dt = match since.as_deref().map(parse_since).transpose() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: invalid --since: {e}");
+            return 2;
+        }
+    };
+
+    let ledger = match open_ledger(&ledger_path) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+
+    let chain = match ledger.verify().await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: verify failed: {e}");
+            return 1;
+        }
+    };
+    let stats = match ledger.graduation_stats(since_dt).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: read failed: {e}");
+            return 1;
+        }
+    };
+
+    let report = GraduationReport::from_stats(&stats, chain.valid, Utc::now());
+
+    let signed: SignedGraduationReport = match signing_key {
+        Some(key_path) => {
+            let pem = match std::fs::read_to_string(&key_path) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: read --signing-key {}: {e}", key_path.display());
+                    return 2;
+                }
+            };
+            let key = match SigningKey::from_pkcs8_pem(&pem) {
+                Ok(k) => k,
+                Err(e) => {
+                    eprintln!("error: parse signing key (expected PKCS#8 Ed25519 PEM): {e}");
+                    return 2;
+                }
+            };
+            match sign_report(&report, &key, Utc::now()) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: sign report: {e}");
+                    return 1;
+                }
+            }
+        }
+        None => {
+            eprintln!(
+                "warning: no --signing-key configured; emitting UNSIGNED report (not tamper-evident)"
+            );
+            match unsigned_report(&report) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("error: build report: {e}");
+                    return 1;
+                }
+            }
+        }
+    };
+
+    let rendered = match format {
+        ReportFormat::Json => match serde_json::to_string_pretty(&signed) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: serialize report: {e}");
+                return 1;
+            }
+        },
+        ReportFormat::Text => render_graduation_text(&signed),
+    };
+
+    match output {
+        Some(path) => {
+            if let Err(e) = std::fs::write(&path, format!("{rendered}\n")) {
+                eprintln!("error: write {}: {e}", path.display());
+                return 1;
+            }
+            eprintln!("graduation report written to {}", path.display());
+        }
+        None => println!("{rendered}"),
+    }
+    0
+}
+
+fn render_graduation_text(signed: &clavenar_lite::report::SignedGraduationReport) -> String {
+    use std::fmt::Write;
+    let r = &signed.report;
+    let mut out = String::new();
+    let _ = writeln!(out, "Clavenar graduation report");
+    let _ = writeln!(out, "  generated: {}", r.generated_at.to_rfc3339());
+    let _ = writeln!(
+        out,
+        "  chain:     {}",
+        if r.ledger_chain_valid { "VALID" } else { "INVALID" }
+    );
+    let _ = writeln!(
+        out,
+        "  requests:  {} ({} allowed, {} would-deny, {} would-pend)",
+        r.total_requests, r.allowed, r.would_deny, r.would_pend
+    );
+    if !r.by_intent_category.is_empty() {
+        let _ = writeln!(out, "  by intent:");
+        for ic in &r.by_intent_category {
+            let _ = writeln!(out, "    {:<16} {}", ic.intent_category, ic.count);
+        }
+    }
+    if !r.top_agents.is_empty() {
+        let _ = writeln!(out, "  top agents:");
+        for ac in &r.top_agents {
+            let _ = writeln!(out, "    {:<24} {}", ac.agent_id, ac.count);
+        }
+    }
+    let sig = match &signed.signature {
+        Some(_) => format!("signed ({})", signed.key_id),
+        None => "UNSIGNED".to_string(),
+    };
+    let _ = writeln!(out, "  signature: {sig}");
+    let _ = writeln!(out, "\n  {}", r.recommendation);
+    out
+}
+
+async fn run_graduate_verify(report_path: PathBuf, pubkey: Option<PathBuf>) -> i32 {
+    use clavenar_lite::report::{SignedGraduationReport, VerifyOutcome, verify_report};
+
+    let raw = match std::fs::read_to_string(&report_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: read {}: {e}", report_path.display());
+            return 2;
+        }
+    };
+    let signed: SignedGraduationReport = match serde_json::from_str(&raw) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: parse report JSON: {e}");
+            return 2;
+        }
+    };
+    let pubkey_pem = match pubkey {
+        Some(p) => match std::fs::read_to_string(&p) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("error: read --pubkey {}: {e}", p.display());
+                return 2;
+            }
+        },
+        None => None,
+    };
+    match verify_report(&signed, pubkey_pem.as_deref()) {
+        VerifyOutcome::Valid => {
+            println!(
+                "OK — signature valid ({}); chain_valid={}",
+                signed.key_id, signed.report.ledger_chain_valid
+            );
+            0
+        }
+        VerifyOutcome::Unsigned => {
+            eprintln!("report is UNSIGNED — no tamper-evidence");
+            2
+        }
+        VerifyOutcome::Forged(msg) => {
+            eprintln!("FORGED — {msg}");
+            2
+        }
+        VerifyOutcome::Malformed(msg) => {
+            eprintln!("MALFORMED — {msg}");
+            2
+        }
+    }
+}
+
+/// Parse a `--since` value: RFC 3339, or a relative duration suffix
+/// (`<N>h` / `<N>d` / `<N>m`) subtracted from now.
+fn parse_since(s: &str) -> Result<chrono::DateTime<Utc>, String> {
+    let s = s.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    let (num, unit) = s.split_at(s.len().saturating_sub(1));
+    let n: i64 = num
+        .parse()
+        .map_err(|_| format!("not RFC 3339 and not a `<N>{{h,d,m}}` duration: {s:?}"))?;
+    let dur = match unit {
+        "h" => chrono::Duration::hours(n),
+        "d" => chrono::Duration::days(n),
+        "m" => chrono::Duration::minutes(n),
+        _ => return Err(format!("unknown duration unit in {s:?} (use h, d, or m)")),
+    };
+    Ok(Utc::now() - dur)
 }
 
 /// Whether `pending list` should emit ANSI colors. False if stdout

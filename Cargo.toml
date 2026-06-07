@@ -40,12 +40,20 @@ serde_json = "1"
 # versa).
 sha2 = "0.10"
 hex = "0.4"
+# Offline Ed25519 for the observe→enforce graduation report. Same
+# algorithm as clavenar-identity's file-signer; lite signs locally with
+# a PKCS#8 key (no online identity service) and embeds the SPKI public
+# key in the report so a reader verifies offline. `pem` enables PKCS#8 /
+# SPKI PEM (de)serialization.
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
+thiserror = "1"
 async-trait = "0.1"
 # Prometheus-format `/metrics` endpoint, same crate pair the full
 # edition (clavenar-proxy, clavenar-brain, clavenar-policy-engine,

@@ -21,5 +21,6 @@ pub mod ledger;
 pub mod policy;
 pub mod proxy;
 pub mod rate_limit;
+pub mod report;
 pub mod slack;
 pub mod webhook;

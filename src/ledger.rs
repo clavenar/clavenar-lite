@@ -30,6 +30,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -550,6 +551,100 @@ impl Ledger {
         let rows = stmt.query_map([agent_id], row_to_entry)?;
         rows.collect()
     }
+
+    /// Aggregate observe-mode verdict rows for the graduation report.
+    /// `since` (when `Some`) bounds the scan to rows at or after that
+    /// instant. Read-only — same shape as `verify`/`entries_for_agent`.
+    pub async fn graduation_stats(
+        &self,
+        since: Option<DateTime<Utc>>,
+    ) -> rusqlite::Result<GraduationStats> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT intent_category, authorized, agent_id, timestamp
+             FROM entries
+             WHERE (?1 IS NULL OR timestamp >= ?1)
+             ORDER BY seq ASC",
+        )?;
+        let since_str = since.map(|s| s.to_rfc3339());
+        let rows = stmt.query_map([since_str], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? != 0,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+
+        let mut stats = GraduationStats {
+            total: 0,
+            would_deny: 0,
+            would_pend: 0,
+            allowed: 0,
+            by_intent: Vec::new(),
+            top_agents: Vec::new(),
+            window_start: since,
+            window_end: None,
+        };
+        let mut intent_counts: BTreeMap<String, u64> = BTreeMap::new();
+        let mut agent_counts: BTreeMap<String, u64> = BTreeMap::new();
+        let mut latest: Option<DateTime<Utc>> = None;
+
+        for row in rows {
+            let (intent, authorized, agent_id, ts) = row?;
+            stats.total += 1;
+            if authorized {
+                stats.allowed += 1;
+            }
+            if WOULD_DENY_INTENTS.contains(&intent.as_str()) {
+                stats.would_deny += 1;
+            } else if intent == "PendingReview" {
+                stats.would_pend += 1;
+            }
+            *intent_counts.entry(intent).or_insert(0) += 1;
+            *agent_counts.entry(agent_id).or_insert(0) += 1;
+            if let Ok(parsed) = DateTime::parse_from_rfc3339(&ts) {
+                let parsed = parsed.with_timezone(&Utc);
+                if latest.is_none_or(|cur| parsed > cur) {
+                    latest = Some(parsed);
+                }
+            }
+        }
+
+        stats.window_end = latest;
+        stats.by_intent = intent_counts.into_iter().collect();
+        // Top agents by count desc, then agent_id asc for stable output.
+        let mut agents: Vec<(String, u64)> = agent_counts.into_iter().collect();
+        agents.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        agents.truncate(TOP_AGENTS_LIMIT);
+        stats.top_agents = agents;
+        Ok(stats)
+    }
+}
+
+/// Intent categories the security pipeline stamps on a row it would
+/// block in enforce mode. In observe mode the request still forwards,
+/// but the ledger row carries one of these so the graduation report can
+/// count "what enforce would have denied".
+const WOULD_DENY_INTENTS: &[&str] =
+    &["PolicyDeny", "BrainDeny", "PromptInjection", "RateLimitDenied"];
+
+/// Cap on the per-agent breakdown in the graduation report.
+const TOP_AGENTS_LIMIT: usize = 10;
+
+/// Aggregated observe-mode verdict counts for the graduation report.
+/// `would_deny`/`would_pend`/`allowed` are the headline numbers; the
+/// per-intent and per-agent breakdowns give the operator the detail.
+#[derive(Debug, Clone)]
+pub struct GraduationStats {
+    pub total: u64,
+    pub would_deny: u64,
+    pub would_pend: u64,
+    pub allowed: u64,
+    pub by_intent: Vec<(String, u64)>,
+    pub top_agents: Vec<(String, u64)>,
+    pub window_start: Option<DateTime<Utc>>,
+    pub window_end: Option<DateTime<Utc>>,
 }
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -1003,5 +1098,50 @@ mod tests {
         let _ = src.backup_to(dest_path.to_str().unwrap()).await.unwrap();
         let snapshot = Ledger::open(dest_path.to_str().unwrap()).unwrap();
         assert!(snapshot.verify().await.unwrap().valid);
+    }
+
+    fn verdict(agent_id: &str, intent: &str, authorized: bool) -> LogRequest {
+        LogRequest {
+            agent_id: agent_id.to_string(),
+            method: "call_tool".to_string(),
+            intent_category: intent.to_string(),
+            authorized,
+            reasoning: "test".to_string(),
+            policy_decision: None,
+            correlation_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn graduation_stats_counts_would_deny_and_pend() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        ledger.append(verdict("a", "Routine", true)).await.unwrap();
+        ledger.append(verdict("a", "PolicyDeny", false)).await.unwrap();
+        ledger.append(verdict("b", "BrainDeny", false)).await.unwrap();
+        ledger.append(verdict("a", "PendingReview", false)).await.unwrap();
+        ledger.append(verdict("a", "RateLimitDenied", false)).await.unwrap();
+
+        let s = ledger.graduation_stats(None).await.unwrap();
+        assert_eq!(s.total, 5);
+        assert_eq!(s.would_deny, 3); // PolicyDeny + BrainDeny + RateLimitDenied
+        assert_eq!(s.would_pend, 1); // PendingReview
+        assert_eq!(s.allowed, 1); // the single Routine
+        // top_agents: a (4) before b (1).
+        assert_eq!(s.top_agents.first().unwrap().0, "a");
+        assert_eq!(s.top_agents.first().unwrap().1, 4);
+    }
+
+    #[tokio::test]
+    async fn graduation_stats_respects_since_window() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        ledger.append(verdict("a", "Routine", true)).await.unwrap();
+        // A `since` far in the future excludes every existing row.
+        let future = Utc::now() + chrono::Duration::days(365);
+        let s = ledger.graduation_stats(Some(future)).await.unwrap();
+        assert_eq!(s.total, 0);
+        // A `since` in the past includes it.
+        let past = Utc::now() - chrono::Duration::days(1);
+        let s = ledger.graduation_stats(Some(past)).await.unwrap();
+        assert_eq!(s.total, 1);
     }
 }
