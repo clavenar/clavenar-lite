@@ -81,14 +81,14 @@ clavenar-lite verify
 ## Try it with your agent
 
 The companion TypeScript SDK,
-[`@vanteguardlabs/clavenar-ai-sdk`](https://www.npmjs.com/package/@vanteguardlabs/clavenar-ai-sdk),
+[`@clavenar/agent-sdk`](https://www.npmjs.com/package/@clavenar/agent-sdk),
 wraps your Anthropic / OpenAI client so every `tool_use` is
 inspected before your tool-execution loop sees it. Point it at the
 local proxy:
 
 ```ts
 import Anthropic from '@anthropic-ai/sdk';
-import { clavenarWrap, ClavenarDenied } from '@vanteguardlabs/clavenar-ai-sdk';
+import { clavenarWrap, ClavenarDenied } from '@clavenar/agent-sdk';
 
 const client = clavenarWrap(new Anthropic(), {
   endpoint: 'http://localhost:8088',   // the clavenar-lite you just booted
@@ -110,7 +110,7 @@ try {
 
 OpenAI works the same way — pass `new OpenAI()` instead, the SDK
 auto-detects the client shape. See the
-[SDK README](https://github.com/clavenar/clavenar-ai-sdk) for
+[SDK README](https://github.com/clavenar/clavenar-typescript-sdk) for
 streaming, observe mode, retry, and verdict-callback options.
 
 ## What's in the box
