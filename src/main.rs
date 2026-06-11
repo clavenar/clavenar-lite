@@ -817,6 +817,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
     let state = Arc::new(AppState {
         policy,
         ledger,
+        tool_pins: Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url: cfg.upstream.clone(),
         http,
         agents,
