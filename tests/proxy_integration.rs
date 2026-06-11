@@ -109,6 +109,7 @@ async fn spawn_lite_with_slack(
     let state = Arc::new(AppState {
         policy: policy.clone(),
         ledger: ledger.clone(),
+        tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url,
         http: reqwest::Client::new(),
         agents,
@@ -1252,6 +1253,7 @@ async fn spawn_lite_with_registry(
     let state = Arc::new(AppState {
         policy: policy.clone(),
         ledger: ledger.clone(),
+        tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url,
         http: reqwest::Client::new(),
         agents: Some(registry),
@@ -1340,6 +1342,7 @@ async fn spawn_lite_with_callbacks(
     let state = Arc::new(AppState {
         policy: policy.clone(),
         ledger: ledger.clone(),
+        tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url,
         http: reqwest::Client::new(),
         agents: None,
@@ -1494,6 +1497,7 @@ async fn spawn_lite_with_webhook(
     let state = Arc::new(AppState {
         policy: policy.clone(),
         ledger: ledger.clone(),
+        tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url,
         http: reqwest::Client::new(),
         agents: None,
@@ -1702,6 +1706,7 @@ async fn rate_limit_gate_emits_429_with_json_body_and_ledger_row() {
     let state = Arc::new(AppState {
         policy,
         ledger: ledger.clone(),
+        tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url: format!("http://{}/mcp", upstream),
         http: reqwest::Client::new(),
         agents,

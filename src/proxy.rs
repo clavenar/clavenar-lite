@@ -220,6 +220,9 @@ impl AgentRegistry {
 pub struct AppState {
     pub policy: Arc<PolicyEngine>,
     pub ledger: Arc<Ledger>,
+    /// MCP supply-chain pin: the first `tools/list` an agent sees is
+    /// pinned and later lists are diffed against it (rug-pull catch).
+    pub tool_pins: Arc<crate::supply_chain::ToolPinStore>,
     pub upstream_url: String,
     pub http: reqwest::Client,
     /// Optional per-agent identity registry. `None` means inbound auth
@@ -1032,6 +1035,18 @@ async fn handle_mcp(
             .into_response();
     }
 
+    // MCP control-plane methods (handshake + catalog) carry no tool
+    // arguments to inspect — `initialize` negotiates capabilities,
+    // `tools/list` returns the catalog, `ping`/`notifications/*` are
+    // keepalives. Routing them through the tool-call deny/park tiers
+    // would block a spec-compliant MCP client's handshake, so they
+    // pass straight to the upstream and the response is relayed. This
+    // is what lets an evaluator add Clavenar as a standard MCP server.
+    // `tools/list` responses additionally feed the supply-chain pin.
+    if is_mcp_control_method(&parsed.method) {
+        return forward_control(&state, &agent_id, &correlation_id, &parsed.method, body).await;
+    }
+
     // `tool_type` is `params.name` when this is a tool call; otherwise
     // we tag it with the JSON-RPC method name itself so the policy
     // rules can distinguish tool calls from other RPC verbs.
@@ -1283,6 +1298,79 @@ async fn handle_mcp(
 /// Byte-equality in time proportional to `expected.len()`. Used for
 /// the bearer-token check so a partial-prefix match isn't detectable
 /// by request latency.
+/// MCP control-plane methods that negotiate the session or enumerate
+/// tools rather than invoke one. They forward through Clavenar
+/// untouched so a spec-compliant MCP client's handshake works, but
+/// they never reach the tool-call security tiers.
+fn is_mcp_control_method(method: &str) -> bool {
+    matches!(
+        method,
+        "initialize"
+            | "initialized"
+            | "notifications/initialized"
+            | "tools/list"
+            | "resources/list"
+            | "prompts/list"
+            | "ping"
+    )
+}
+
+/// Forward an MCP control request to the upstream and relay the
+/// response verbatim (status + body + Clavenar correlation header).
+/// For `tools/list`, the response tool definitions are handed to the
+/// supply-chain pin so a rug-pull (a mutated definition on a later
+/// list) is detectable.
+async fn forward_control(
+    state: &AppState,
+    agent_id: &str,
+    correlation_id: &str,
+    method: &str,
+    body: Bytes,
+) -> axum::response::Response {
+    let mut req_builder = state
+        .http
+        .post(&state.upstream_url)
+        .header("Content-Type", "application/json")
+        .body(body);
+    if let Some(api_key) = &state.upstream_api_key {
+        req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
+    }
+    let upstream = match req_builder.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                clavenar_headers(correlation_id, state.mode, false, false),
+                format!("upstream unreachable: {}", e),
+            )
+                .into_response();
+        }
+    };
+    let status = upstream.status();
+    let upstream_body = match upstream.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                clavenar_headers(correlation_id, state.mode, false, false),
+                format!("upstream body read error: {}", e),
+            )
+                .into_response();
+        }
+    };
+    if method == "tools/list" {
+        crate::supply_chain::observe_tools_list(state, agent_id, &upstream_body).await;
+    }
+    let out_status = StatusCode::from_u16(status.as_u16())
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (
+        out_status,
+        clavenar_headers(correlation_id, state.mode, false, false),
+        upstream_body,
+    )
+        .into_response()
+}
+
 fn constant_time_eq(supplied: &[u8], expected: &[u8]) -> bool {
     if supplied.len() != expected.len() {
         return false;
@@ -1412,6 +1500,7 @@ mod tests {
         let _state = Arc::new(AppState {
             policy,
             ledger,
+            tool_pins: std::sync::Arc::new(crate::supply_chain::ToolPinStore::new()),
             upstream_url: "http://127.0.0.1:0/never-called".into(),
             http: reqwest::Client::new(),
             agents: None,
