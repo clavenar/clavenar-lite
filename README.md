@@ -485,8 +485,10 @@ The Rego input shape is the full edition's `PolicyInput`:
 Lite is for developer-laptop use. It deliberately omits:
 
 - **Semantic LLM-based detection.** The full edition runs every
-  request through Claude 4.5 Haiku for intent classification + a
-  separate-call indirect-injection detector. Lite has only the
+  request through a pluggable inspector LLM for intent classification
+  + a separate-call indirect-injection detector — Claude Haiku 4.5 by
+  default, with any provider (OpenAI, Google, Bedrock, Vertex, Ollama)
+  swapped in via `CLAVENAR_BRAIN_MODELS_FILE`. Lite has only the
   heuristic regex matcher — it catches DAN-style jailbreaks and the
   obvious "ignore previous instructions" overrides, and misses
   everything subtle. If your threat model includes nation-state-grade
