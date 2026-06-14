@@ -271,6 +271,13 @@ pub struct AppState {
     /// `intent_category="RateLimitDenied"` is emitted so audit shows
     /// the throttle alongside Allow / Deny / Park.
     pub rate_limiter: Option<Arc<RateLimiter>>,
+    /// Verbose-verdict developer experience. When `true`, deny/park
+    /// responses carry a per-detector `detail` breakdown. Default
+    /// `false`: a detailed denial leaks detection logic, so this is a
+    /// dev knob set via `--verbose-verdicts` /
+    /// `CLAVENAR_LITE_VERBOSE_VERDICTS`. Mirrors the full edition's
+    /// `CLAVENAR_PROXY_VERBOSE_VERDICTS` and emits the same JSON shape.
+    pub verbose_verdicts: bool,
 }
 
 /// Wire shape for the `POST /mcp` request body. We accept any JSON
@@ -296,6 +303,10 @@ struct DenyResponse {
     reasons: Vec<String>,
     review_reasons: Vec<String>,
     intent_category: String,
+    /// Per-detector breakdown — present ONLY under `--verbose-verdicts`.
+    /// Same JSON shape as the full edition's envelope `detail`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<VerdictBreakdown>,
 }
 
 /// Response we emit on a yellow-tier park (202 Accepted). The SDK
@@ -308,6 +319,52 @@ struct PendingResponse {
     status: &'static str,
     correlation_id: String,
     review_reasons: Vec<String>,
+    /// Per-detector breakdown — present ONLY under `--verbose-verdicts`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<VerdictBreakdown>,
+}
+
+/// Per-detector breakdown for the verbose-verdict developer experience.
+/// Carries the heuristic Brain's numeric signals — what the standard
+/// reasons strings don't expose. The `detectors` array matches the full
+/// edition's `clavenar_proxy` `VerdictBreakdown` shape so one SDK parses
+/// both editions; the full edition may additionally carry a `degraded`
+/// key (lite has no degradable LLM lanes, so it never emits one).
+#[derive(Debug, Serialize)]
+struct VerdictBreakdown {
+    detectors: Vec<DetectorSignal>,
+}
+
+/// One heuristic detector's contribution. Lite's embedded Brain runs
+/// only the injection needle scan and an intent-score heuristic — it has
+/// no embedding/LLM lanes — so the breakdown is honestly two entries,
+/// not the full edition's five. `flagged` is the boolean verdict where
+/// the detector reports one; `None` for the numeric intent score.
+#[derive(Debug, Serialize)]
+struct DetectorSignal {
+    detector: &'static str,
+    score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    flagged: Option<bool>,
+}
+
+impl VerdictBreakdown {
+    fn from_verdict(brain: &HeuristicVerdict) -> Self {
+        VerdictBreakdown {
+            detectors: vec![
+                DetectorSignal {
+                    detector: "injection",
+                    score: brain.injection_confidence,
+                    flagged: Some(brain.injection_detected),
+                },
+                DetectorSignal {
+                    detector: "intent",
+                    score: brain.intent_score,
+                    flagged: None,
+                },
+            ],
+        }
+    }
 }
 
 /// Three-way outcome of running brain + policy on one request.
@@ -1171,6 +1228,9 @@ async fn handle_mcp(
             status: "pending",
             correlation_id: correlation_id.clone(),
             review_reasons: policy.review_reasons.clone(),
+            detail: state
+                .verbose_verdicts
+                .then(|| VerdictBreakdown::from_verdict(&brain)),
         };
         return (
             StatusCode::ACCEPTED,
@@ -1209,6 +1269,9 @@ async fn handle_mcp(
             reasons,
             review_reasons: policy.review_reasons.clone(),
             intent_category: brain.intent_category.clone(),
+            detail: state
+                .verbose_verdicts
+                .then(|| VerdictBreakdown::from_verdict(&brain)),
         };
         return (
             StatusCode::FORBIDDEN,
@@ -1511,6 +1574,7 @@ mod tests {
             callback_allowlist: Vec::new(),
             webhook_url: None,
             rate_limiter: None,
+            verbose_verdicts: false,
         });
     }
 }

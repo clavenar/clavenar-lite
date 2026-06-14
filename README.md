@@ -222,7 +222,34 @@ Every flag falls back to a `CLAVENAR_LITE_*` env var:
 | `--webhook-url`            | `CLAVENAR_LITE_WEBHOOK_URL`            | (none — webhook off)      |
 | `--rate-limit-qps`         | `CLAVENAR_LITE_RATE_LIMIT_QPS`         | 0 (rate limit off)        |
 | `--rate-limit-burst`       | `CLAVENAR_LITE_RATE_LIMIT_BURST`       | `ceil(qps)`               |
+| `--verbose-verdicts`       | `CLAVENAR_LITE_VERBOSE_VERDICTS`       | off (dev knob)            |
 | `--signing-key` (graduate) | `CLAVENAR_LITE_SIGNING_KEY_PATH`       | (none — unsigned report)  |
+
+### Verbose verdicts (developer denial loop)
+
+Pass `--verbose-verdicts` (or `CLAVENAR_LITE_VERBOSE_VERDICTS=true`) to
+enrich deny/park responses with a `detail` object carrying the embedded
+Brain's per-detector scores — so a developer who got denied can see
+*which* heuristic fired without grepping the ledger:
+
+```json
+{
+  "error": "security_violation",
+  "reasons": ["Heuristic injection match: ignore previous instructions"],
+  "intent_category": "PromptInjection",
+  "detail": {
+    "detectors": [
+      { "detector": "injection", "score": 0.6, "flagged": true },
+      { "detector": "intent",    "score": 0.9 }
+    ]
+  }
+}
+```
+
+Same `detail` shape as the full edition's proxy (`CLAVENAR_PROXY_VERBOSE_VERDICTS`),
+so one agent SDK parses both. **Off by default and a dev knob only** — a
+detailed denial leaks detection logic to a caller; lite logs a startup
+warning when it's on.
 
 ### Per-agent rate limiting
 

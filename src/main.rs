@@ -157,6 +157,15 @@ enum Command {
         /// `CLAVENAR_LITE_RATE_LIMIT_BURST`.
         #[arg(long, env = "CLAVENAR_LITE_RATE_LIMIT_BURST")]
         rate_limit_burst: Option<u32>,
+
+        /// Enrich deny/park responses with the per-detector heuristic
+        /// breakdown (`detail`). Off by default — a detailed denial
+        /// leaks detection logic, so this is a dev knob. The
+        /// `CLAVENAR_LITE_VERBOSE_VERDICTS` env var (`true`/`1`/`yes`)
+        /// also enables it, matching the full edition's truthy set; an
+        /// unrecognized value stays off rather than aborting boot.
+        #[arg(long)]
+        verbose_verdicts: bool,
     },
 
     /// Walk every entry in the ledger and confirm the hash chain is
@@ -383,6 +392,7 @@ async fn main() {
             webhook_url,
             rate_limit_qps,
             rate_limit_burst,
+            verbose_verdicts,
         } => {
             let port = port.unwrap_or(8088);
             let upstream = upstream.unwrap_or_else(|| "http://localhost:9000/mcp".into());
@@ -391,6 +401,13 @@ async fn main() {
             let velocity_window = velocity_window.unwrap_or(60);
             let upstream_timeout = Duration::from_secs(upstream_timeout_secs.unwrap_or(120));
             let mode = mode.unwrap_or(ClavenarMode::Enforce);
+            // The flag enables it; so does a truthy env var. Mirrors the
+            // full edition's `true|1|yes` set and fails closed (off) on
+            // anything else, rather than clap's bool+env crash-on-`1`.
+            let verbose_verdicts = verbose_verdicts
+                || std::env::var("CLAVENAR_LITE_VERBOSE_VERDICTS")
+                    .map(|v| matches!(v.trim(), "true" | "1" | "yes"))
+                    .unwrap_or(false);
 
             run_start(StartConfig {
                 port,
@@ -409,6 +426,7 @@ async fn main() {
                 webhook_url,
                 rate_limit_qps,
                 rate_limit_burst,
+                verbose_verdicts,
             })
             .await
         }
@@ -691,6 +709,7 @@ struct StartConfig {
     webhook_url: Option<String>,
     rate_limit_qps: Option<f64>,
     rate_limit_burst: Option<u32>,
+    verbose_verdicts: bool,
 }
 
 /// Parse `--mode` / `CLAVENAR_LITE_MODE` into a {@link ClavenarMode}.
@@ -814,6 +833,14 @@ async fn run_start(cfg: StartConfig) -> i32 {
         clavenar_lite::rate_limit::RateLimiter::from_config(config).map(Arc::new)
     };
 
+    if cfg.verbose_verdicts {
+        tracing::warn!(
+            "verbose verdicts ON (--verbose-verdicts / CLAVENAR_LITE_VERBOSE_VERDICTS) — \
+             deny/park responses carry a per-detector breakdown. This leaks detection logic \
+             to a caller; enable only in dev."
+        );
+    }
+
     let state = Arc::new(AppState {
         policy,
         ledger,
@@ -828,6 +855,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
         callback_allowlist,
         webhook_url: cfg.webhook_url.clone(),
         rate_limiter,
+        verbose_verdicts: cfg.verbose_verdicts,
     });
 
     // Install the Prometheus recorder once before any emit site fires.
