@@ -257,6 +257,8 @@ with the embedded heuristic Brain, `regorus`-backed Rego policy
 engine, SHA-256 hash-chained SQLite ledger, and axum proxy. Wire
 format and chain shape are byte-compatible with the full edition.
 
+[0.6.0]: https://github.com/clavenar/clavenar-lite/releases/tag/v0.6.0
+[0.5.0]: https://github.com/clavenar/clavenar-lite/releases/tag/v0.5.0
 [0.4.1]: https://github.com/clavenar/clavenar-lite/releases/tag/v0.4.1
 [0.4.0]: https://github.com/clavenar/clavenar-lite/releases/tag/v0.4.0
 [0.3.0]: https://github.com/clavenar/clavenar-lite/releases/tag/v0.3.0

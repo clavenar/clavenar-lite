@@ -34,7 +34,7 @@ docker run -p 8088:8088 \
 
 The image is multi-arch (`linux/amd64` + `linux/arm64`), published from
 the [release workflow](.github/workflows/release.yml) on every `v*`
-tag. Pin to `:0.4.0` if you want a fixed version; `:latest` tracks the
+tag. Pin to `:0.6.0` if you want a fixed version; `:latest` tracks the
 newest tagged release.
 
 **Fly.io** (deploy button above, or):
@@ -48,7 +48,7 @@ fly deploy
 **Static binary** (no Rust toolchain, no docker):
 
 ```bash
-V=0.4.0
+V=0.6.0
 curl -fsSL "https://github.com/clavenar/clavenar-lite/releases/download/v${V}/clavenar-lite-${V}-x86_64-linux-musl.tar.gz" \
   | tar -xz
 ./clavenar-lite start --mode observe \
