@@ -1,10 +1,11 @@
 # clavenar-lite sequence diagrams
 
-Five sequence diagrams covering the wire-level behaviour of the
+Six sequence diagrams covering the wire-level behaviour of the
 single-binary OSS edition: boot, the Green-tier `POST /mcp` fast path,
 Yellow-tier park with optional Slack + outbound webhook, operator
-decide + async-HIL callback, and `clavenar-lite verify` chain-version
-dispatch. One flowchart at the end captures the Brain/policy tier
+decide + async-HIL callback, `clavenar-lite verify` chain-version
+dispatch, and the MCP control-plane passthrough with its supply-chain
+tool-pin shield. One flowchart at the end captures the Brain/policy tier
 classification with its `enforce` / `observe` branching.
 
 The wire shapes mirror `clavenar-proxy` + `clavenar-ledger` (the full
@@ -316,14 +317,72 @@ sequenceDiagram
     end
 ```
 
-## 6. Tier classification + mode branching (flowchart)
+## 6. MCP control-plane passthrough + supply-chain tool-pin shield
 
-The classifier itself is three lines (`classify` in
-`src/proxy.rs:323`) but the practical behavior of a single `/mcp`
-request fans out across the heuristic / policy outcomes and the
-enforce / observe knob. This is the decision tree that decides what
-HTTP status the agent sees and which ledger rows + webhook events
-fire.
+The MCP control plane — the handshake and catalog verbs an MCP client
+issues before it ever calls a tool — carries no tool arguments to
+inspect, so `handle_mcp` short-circuits the seven control methods
+(`initialize`, `initialized`, `notifications/initialized`, `tools/list`,
+`resources/list`, `prompts/list`, `ping`) straight to the upstream via
+`forward_control` *before* any Brain/policy work — after the auth,
+rate-limit, callback-validate, and parse gates still run (Sec 2). They
+bypass the tiers and write no per-request ledger row: routing a
+spec-compliant handshake through the deny/park tiers would block a
+client from connecting at all. The one place the control plane still
+touches the audit chain is `tools/list` — `forward_control` feeds the
+response to `supply_chain::observe_tools_list`, which pins the first
+catalog an agent sees and appends a `tool_schema_poisoned` forensic row
+(`intent_category="SupplyChain"`, `authorized=false`) when a later list
+diverges from the pin. That is the canonical MCP tool-poisoning /
+rug-pull catch.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent
+    participant Proxy as handle_mcp
+    participant Fwd as forward_control
+    participant Pins as supply_chain::observe_tools_list
+    participant Store as ToolPinStore
+    participant Ledger as Ledger
+    participant Upstream
+
+    Agent->>Proxy: POST /mcp { method: initialize|tools/list|ping|... }
+    Proxy->>Proxy: auth + rate-limit + callback validate + parse (Sec 2)
+    Proxy->>Proxy: is_mcp_control_method(method) == true
+    Note over Proxy: 7 control methods bypass brain/policy/classify —<br/>no tier, no per-request ledger row
+    Proxy->>Fwd: forward_control(agent_id, correlation_id, method, body)
+    Fwd->>Upstream: POST upstream_url (Bearer upstream_api_key if set), body verbatim
+    Upstream-->>Fwd: status + body
+    opt method == tools/list
+        Fwd->>Pins: observe_tools_list(agent_id, body)
+        Pins->>Pins: definition_hashes — sha256(canonical(description + inputSchema)) per tool (unparseable body returns early)
+        Pins->>Store: lock pins, read agent_id catalog
+        alt first tools/list for agent_id
+            Store-->>Pins: None
+            Pins->>Store: pin fresh catalog — return (no ledger row)
+        else diverges from pin (mutated / added / removed)
+            Store-->>Pins: pinned catalog
+            Pins->>Pins: diff_against_pin — non-empty change set
+            Pins->>Ledger: append method=tools/list, intent_category=SupplyChain, authorized=false, policy_decision={signal:tool_schema_poisoned}
+            Ledger-->>Pins: ok (warn on append fail)
+        else matches pin
+            Store-->>Pins: pinned catalog
+            Pins->>Pins: diff empty — no row
+        end
+    end
+    Fwd-->>Agent: upstream status + body + X-Clavenar-Correlation-Id + X-Clavenar-Mode
+```
+
+## 7. Tier classification + mode branching (flowchart)
+
+The classifier itself is three lines (`classify` in `src/proxy.rs`) but
+the practical behavior of a single `/mcp` request fans out across the
+heuristic / policy outcomes and the enforce / observe knob. This is the
+decision tree that decides what HTTP status the agent sees and which
+ledger rows + webhook events fire. The seven MCP control methods branch
+off this tree before any tier is computed (Sec 6) — they forward
+straight through and the tiers below never see them.
 
 ```mermaid
 flowchart TD
@@ -335,7 +394,10 @@ flowchart TD
     CB -->|reject| H400CB[400 Bad Request<br/>callback URL outside allowlist]
     CB -->|ok / absent| Parse{JSON-RPC parse<br/>and method non-empty}
     Parse -->|fail| H400[400 Bad Request]
-    Parse -->|ok| Pipe[heuristics inspect<br/>+ policy evaluate]
+    Parse -->|ok| Ctrl{is_mcp_control_method}
+    Ctrl -->|yes| Fwd[forward_control<br/>passthrough to upstream<br/>no tier, no per-request ledger row]
+    Ctrl -->|no| Pipe[heuristics inspect<br/>+ policy evaluate]
+    Fwd --> CtrlOut[relay upstream status + body<br/>X-Clavenar-Correlation-Id + X-Clavenar-Mode<br/>tools/list also feeds supply-chain pin]
     Pipe --> Tier{classify<br/>brain, policy}
 
     Tier -->|brain authorized=false<br/>OR policy allow=false| Red[Tier Red]
