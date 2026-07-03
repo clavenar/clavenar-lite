@@ -9,11 +9,19 @@ multi-instance velocity (those are the full edition). Apache-2.0, Rust
 edition 2024.
 
 ## Build, test, lint
-- Build: `cargo build` (release: `cargo build --release`). Release artifact is built `--locked` for the static musl target: `cargo build --release --locked --target x86_64-unknown-linux-musl` (needs `musl-tools`; CI asserts the binary is truly static via `ldd`).
-- Test: `cargo test`. CI additionally runs `./scripts/smoke-e2e.sh` — boots the runtime image and exercises all three verdicts + the park-poll-decide loop + concurrent audit read (needs docker).
-- Lint: `cargo clippy --all-targets -- -D warnings`. Supply-chain: `cargo deny check all` + `cargo cyclonedx --format json --describe crate`.
-- Host-build caveat: `target/` may be root-owned from prior docker builds — pass `CARGO_TARGET_DIR=/tmp/clavenar-lite-target`.
-- Docker: `docker build -t ghcr.io/clavenar/clavenar-lite:latest .` (release workflow ships multi-arch amd64+arm64 on `v*` tags; tag must match `Cargo.toml` version).
+
+```bash
+cargo build                                # release: cargo build --release
+cargo build --release --locked --target x86_64-unknown-linux-musl   # static release artifact (needs musl-tools; CI asserts truly static via ldd)
+cargo test
+./scripts/smoke-e2e.sh                     # CI e2e (needs docker): boots the runtime image — all three verdicts + park-poll-decide loop + concurrent audit read
+cargo clippy --all-targets -- -D warnings
+cargo deny check all                       # supply-chain gate
+cargo cyclonedx --format json --describe crate   # SBOM
+docker build -t ghcr.io/clavenar/clavenar-lite:latest .
+```
+
+Host-build caveat: `target/` may be root-owned from prior docker builds — pass `CARGO_TARGET_DIR=/tmp/clavenar-lite-target`. Release workflow ships multi-arch amd64+arm64 on `v*` tags; tag must match `Cargo.toml` version.
 
 Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `0.0.0.0:8088` (`--port` / `CLAVENAR_LITE_PORT`). Subcommands: `start`, `verify`, `audit <agent_id>`, `backup`, `restore`, `graduate {report,verify}`, `pending {list,get,decide}`. Every flag has a `CLAVENAR_LITE_*` env fallback (see README matrix).
 
@@ -35,14 +43,14 @@ Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `
 - **Wire + chain are byte-compatible with the full edition.** A Lite-produced chain verifies under the production ledger; full-edition `governance.rego` runs verbatim here. Don't change the hash-chain serialization or the `PolicyInput` shape without matching the full edition.
 - Three verdicts: `200` allow / `403` deny (`security_violation`) / `202` park (`pending`). Observe mode passes everything through, still writes `authorized=false` rows, and adds `X-Clavenar-Would-Deny: true`. Every response (incl. 4xx/5xx) carries `X-Clavenar-Correlation-Id` + `X-Clavenar-Mode`.
 - Default mode is `enforce` (CLI/env default); README quickstarts set `observe` explicitly — keep that distinction intact.
-- `verify` exit codes are CI contracts: `0` valid, `2` chain corruption (points at first bad seq), `1` runtime error. Rows are tagged `chain_version`; `verify` refuses (not "tamper") on a newer-version row.
+- `verify` exit codes are CI contracts: `0` valid, `1` runtime error, `2` for any invalid/unverifiable chain — tamper (the message points at the first bad seq) OR a row written under a newer `chain_version` this binary can't verify (message says "Upgrade", not tamper).
 - Two independent auth tokens: agent `--token` gates `/mcp` + pending reads; operator `--decide-token` gates decide — so an agent can't approve its own pending. Decide is idempotent: a second decide returns `409`, never a silent overwrite.
 - Rate-limit gate emits `429` + a `RateLimitDenied` ledger row + the `clavenar_lite_rate_limit_denied_total` counter; it runs before any brain/policy work.
 - `--verbose-verdicts` is a dev knob, OFF by default — it leaks detector logic to the caller; the binary logs a startup warning when on.
 - Dependency choices are load-bearing for the one-command static install: `reqwest` rustls-tls (no system openssl), `rusqlite` `bundled` (no system libsqlite). Don't reintroduce native-tls or a system-lib dep.
 - `[lints.rust] unreachable_pub = "warn"` — keep the module surface tight; don't widen visibility past what `lib.rs` needs to re-export.
 
-Rust standards (the floor): clippy `-D warnings` is mandatory — fix the code, never `#[allow]` to silence (a documented false positive is the only exception). Types in a `pub` fn signature must be `pub` (no `pub(crate)` leaking through). Tests live at file bottom in `#[cfg(test)] mod tests`. Prefer `writeln!` over `write!(…, "\n")` and let-chains over nested `if let`. Doc comments: no `+ ` line-start continuations (clippy reads them as list items). `deny.toml` is synced verbatim from the public `clavenar-specs` repo — don't hand-edit it to diverge. Bash scripts: `set -euo pipefail`, pass `shellcheck -S warning`, quote everything.
+Rust house rules: clippy `-D warnings` is mandatory — fix the code, never `#[allow]` to silence (a documented false positive is the only exception). Types in a `pub` fn signature must be `pub` (no `pub(crate)` leaking through). Tests live at file bottom in `#[cfg(test)] mod tests`. Prefer `writeln!` over `write!(…, "\n")` and let-chains over nested `if let`. Doc comments: no `+ ` line-start continuations (clippy reads them as list items). `deny.toml` is synced verbatim from `clavenar-specs` — edit it there first, then mirror the exact bytes. Bash scripts: `set -euo pipefail`, pass `shellcheck -S warning`, quote everything.
 
 ## Pointers
 README.md · SECURITY.md · docs/SEQUENCES.md
