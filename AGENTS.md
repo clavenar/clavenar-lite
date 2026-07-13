@@ -40,6 +40,9 @@ Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `
 - Routes (port 8088): `GET /`,`/health`,`/readyz`,`/metrics`; `POST /mcp`; `GET /pending`, `GET /pending/{id}`, `POST /pending/{id}/decide`.
 
 ## Conventions & invariants
+
+- After adding or updating a feature, also update the relevant `MANUAL_TESTS*` file(s) when needed.
+
 - **Wire + chain are byte-compatible with the full edition.** A Lite-produced chain verifies under the production ledger; full-edition `governance.rego` runs verbatim here. Don't change the hash-chain serialization or the `PolicyInput` shape without matching the full edition.
 - Three verdicts: `200` allow / `403` deny (`security_violation`) / `202` park (`pending`). Observe mode passes everything through, still writes `authorized=false` rows, and adds `X-Clavenar-Would-Deny: true`. Every response (incl. 4xx/5xx) carries `X-Clavenar-Correlation-Id` + `X-Clavenar-Mode`.
 - Default mode is `enforce` (CLI/env default); README quickstarts set `observe` explicitly — keep that distinction intact.
