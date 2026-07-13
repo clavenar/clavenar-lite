@@ -52,5 +52,7 @@ Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `
 
 Rust house rules: clippy `-D warnings` is mandatory — fix the code, never `#[allow]` to silence (a documented false positive is the only exception). Types in a `pub` fn signature must be `pub` (no `pub(crate)` leaking through). Tests live at file bottom in `#[cfg(test)] mod tests`. Prefer `writeln!` over `write!(…, "\n")` and let-chains over nested `if let`. Doc comments: no `+ ` line-start continuations (clippy reads them as list items). `deny.toml` is synced verbatim from `clavenar-specs` — edit it there first, then mirror the exact bytes. Bash scripts: `set -euo pipefail`, pass `shellcheck -S warning`, quote everything.
 
+Commit subjects must start with a lowercase letter.
+
 ## Pointers
 README.md · SECURITY.md · docs/SEQUENCES.md
