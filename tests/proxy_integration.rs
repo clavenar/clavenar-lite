@@ -15,10 +15,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::{extract::State, routing::post, Router};
+use axum::{Router, extract::State, routing::post};
 use clavenar_lite::ledger::Ledger;
 use clavenar_lite::policy::PolicyEngine;
-use clavenar_lite::proxy::{build_router, AgentRegistry, AppState, ClavenarMode};
+use clavenar_lite::proxy::{AgentRegistry, AppState, ClavenarMode, build_router};
 
 fn policies_dir() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -194,8 +194,7 @@ async fn park_wire_transfer(lite_addr: SocketAddr) -> String {
 #[tokio::test]
 async fn happy_path_routine_request_forwards_and_logs() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -223,8 +222,7 @@ async fn happy_path_routine_request_forwards_and_logs() {
 #[tokio::test]
 async fn injection_blocked_with_403_and_logged() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -292,8 +290,12 @@ async fn observe_mode_forwards_what_enforce_would_deny() {
     // would-have-denied verdict, and the X-Clavenar-Would-Deny header
     // tells the partner what enforce mode would have done.
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, ledger) =
-        spawn_lite_with_mode(format!("http://{}/mcp", upstream), None, ClavenarMode::Observe).await;
+    let (lite_addr, ledger) = spawn_lite_with_mode(
+        format!("http://{}/mcp", upstream),
+        None,
+        ClavenarMode::Observe,
+    )
+    .await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -312,7 +314,11 @@ async fn observe_mode_forwards_what_enforce_would_deny() {
 
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(
-        resp.headers().get("x-clavenar-mode").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("x-clavenar-mode")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "observe"
     );
     assert_eq!(
@@ -337,8 +343,12 @@ async fn observe_mode_does_not_set_would_deny_for_allowed_requests() {
     // would-deny — partners can lean on header presence as a clean
     // boolean flag for "this would have been blocked."
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, _ledger) =
-        spawn_lite_with_mode(format!("http://{}/mcp", upstream), None, ClavenarMode::Observe).await;
+    let (lite_addr, _ledger) = spawn_lite_with_mode(
+        format!("http://{}/mcp", upstream),
+        None,
+        ClavenarMode::Observe,
+    )
+    .await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -354,7 +364,11 @@ async fn observe_mode_does_not_set_would_deny_for_allowed_requests() {
 
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(
-        resp.headers().get("x-clavenar-mode").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("x-clavenar-mode")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "observe"
     );
     assert!(resp.headers().get("x-clavenar-would-deny").is_none());
@@ -367,8 +381,7 @@ async fn correlation_id_round_trips_to_ledger_row() {
     // turn a ClavenarDenied.correlationId on the SDK side into a
     // specific row in the audit ledger.
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -391,11 +404,19 @@ async fn correlation_id_round_trips_to_ledger_row() {
         .unwrap()
         .to_string();
     // Sanity-check the shape — UUID v4 is 36 chars with four dashes.
-    assert_eq!(header_id.len(), 36, "expected UUID-shaped header, got {:?}", header_id);
+    assert_eq!(
+        header_id.len(),
+        36,
+        "expected UUID-shaped header, got {:?}",
+        header_id
+    );
 
     let entries = ledger.entries_for_agent("anonymous").await.unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].correlation_id.as_deref(), Some(header_id.as_str()));
+    assert_eq!(
+        entries[0].correlation_id.as_deref(),
+        Some(header_id.as_str())
+    );
 }
 
 #[tokio::test]
@@ -405,8 +426,7 @@ async fn correlation_id_present_on_403_deny() {
     // the matching ledger row. The header must be on the 403, not
     // just on success paths.
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -435,7 +455,10 @@ async fn correlation_id_present_on_403_deny() {
     let entries = ledger.entries_for_agent("anonymous").await.unwrap();
     assert_eq!(entries.len(), 1);
     assert!(!entries[0].authorized);
-    assert_eq!(entries[0].correlation_id.as_deref(), Some(header_id.as_str()));
+    assert_eq!(
+        entries[0].correlation_id.as_deref(),
+        Some(header_id.as_str())
+    );
 }
 
 #[tokio::test]
@@ -445,8 +468,11 @@ async fn correlation_id_present_on_401_auth_fail() {
     // a correlation id so partners can trace the rejected attempt
     // through the access log.
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, _ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), Some("expected-token".into())).await;
+    let (lite_addr, _ledger) = spawn_lite(
+        format!("http://{}/mcp", upstream),
+        Some("expected-token".into()),
+    )
+    .await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -467,8 +493,7 @@ async fn correlation_id_present_on_401_auth_fail() {
 #[tokio::test]
 async fn sql_execute_policy_blocked() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -489,8 +514,10 @@ async fn sql_execute_policy_blocked() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let reasons = body["reasons"].as_array().unwrap();
     assert!(
-        reasons.iter().any(|r| r.as_str().unwrap_or("").contains("SQL")
-            || r.as_str().unwrap_or("").contains("DangerousTool")),
+        reasons
+            .iter()
+            .any(|r| r.as_str().unwrap_or("").contains("SQL")
+                || r.as_str().unwrap_or("").contains("DangerousTool")),
         "expected SQL-related deny reason, got {:?}",
         reasons
     );
@@ -509,8 +536,7 @@ async fn wire_transfer_parks_for_review_with_202() {
     // edition routes this same condition to clavenar-hil; the
     // SDK-visible shape is identical.
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -538,7 +564,10 @@ async fn wire_transfer_parks_for_review_with_202() {
 
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "pending");
-    assert_eq!(body["correlation_id"], serde_json::Value::String(header_id.clone()));
+    assert_eq!(
+        body["correlation_id"],
+        serde_json::Value::String(header_id.clone())
+    );
     let reviews = body["review_reasons"].as_array().unwrap();
     assert!(!reviews.is_empty());
     assert!(reviews[0].as_str().unwrap().contains("Wire transfers"));
@@ -558,7 +587,10 @@ async fn wire_transfer_parks_for_review_with_202() {
     assert_eq!(entries.len(), 1);
     assert!(!entries[0].authorized);
     assert_eq!(entries[0].intent_category, "PendingReview");
-    assert_eq!(entries[0].correlation_id.as_deref(), Some(header_id.as_str()));
+    assert_eq!(
+        entries[0].correlation_id.as_deref(),
+        Some(header_id.as_str())
+    );
 }
 
 #[tokio::test]
@@ -670,8 +702,7 @@ async fn bearer_token_required_when_set() {
 #[tokio::test]
 async fn ledger_chain_verifies_after_burst() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     // Mix of allowed + denied requests through the live proxy.
     let client = reqwest::Client::new();
@@ -696,15 +727,18 @@ async fn ledger_chain_verifies_after_burst() {
     }
 
     let v = ledger.verify().await.unwrap();
-    assert!(v.valid, "chain corrupt: first invalid={:?}", v.first_invalid_seq);
+    assert!(
+        v.valid,
+        "chain corrupt: first invalid={:?}",
+        v.first_invalid_seq
+    );
     assert_eq!(v.entries_checked, 5);
 }
 
 #[tokio::test]
 async fn malformed_body_returns_400() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, _ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -722,8 +756,7 @@ async fn empty_method_rejected() {
     // empty method would slip through Brain/policy as tool_type="" and
     // match no deny rule.
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/mcp", lite_addr))
@@ -739,14 +772,16 @@ async fn empty_method_rejected() {
     assert_eq!(resp.status().as_u16(), 400);
     // Nothing should be appended to the ledger when we reject pre-pipeline.
     let entries = ledger.entries_for_agent("anonymous").await.unwrap();
-    assert!(entries.is_empty(), "rejected request must not write a ledger row");
+    assert!(
+        entries.is_empty(),
+        "rejected request must not write a ledger row"
+    );
 }
 
 #[tokio::test]
 async fn decide_allow_flips_pending_and_writes_audit_row() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
     let corr = park_wire_transfer(lite_addr).await;
 
     let resp = reqwest::Client::new()
@@ -779,8 +814,7 @@ async fn decide_allow_flips_pending_and_writes_audit_row() {
 #[tokio::test]
 async fn decide_deny_writes_pending_denied_audit_row() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
     let corr = park_wire_transfer(lite_addr).await;
 
     let resp = reqwest::Client::new()
@@ -800,8 +834,7 @@ async fn decide_deny_writes_pending_denied_audit_row() {
 #[tokio::test]
 async fn decide_twice_returns_409() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, _ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
     let corr = park_wire_transfer(lite_addr).await;
 
     let client = reqwest::Client::new();
@@ -825,8 +858,7 @@ async fn decide_twice_returns_409() {
 #[tokio::test]
 async fn decide_unknown_correlation_id_returns_404() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, _ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
         .post(format!("http://{}/pending/no-such-thing/decide", lite_addr))
@@ -840,8 +872,7 @@ async fn decide_unknown_correlation_id_returns_404() {
 #[tokio::test]
 async fn decide_invalid_decision_string_returns_400() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, _ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
     let corr = park_wire_transfer(lite_addr).await;
 
     let resp = reqwest::Client::new()
@@ -856,8 +887,7 @@ async fn decide_invalid_decision_string_returns_400() {
 #[tokio::test]
 async fn poll_returns_pending_before_decision() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, _ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
     let corr = park_wire_transfer(lite_addr).await;
 
     let resp = reqwest::Client::new()
@@ -867,7 +897,10 @@ async fn poll_returns_pending_before_decision() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["correlation_id"], serde_json::Value::String(corr.clone()));
+    assert_eq!(
+        body["correlation_id"],
+        serde_json::Value::String(corr.clone())
+    );
     assert_eq!(body["tool_type"], "wire_transfer");
     assert!(body["decision"].is_null());
     assert!(body["decided_at"].is_null());
@@ -878,8 +911,7 @@ async fn poll_returns_pending_before_decision() {
 #[tokio::test]
 async fn poll_reflects_decision_after_decide() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, _ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
     let corr = park_wire_transfer(lite_addr).await;
 
     let client = reqwest::Client::new();
@@ -906,8 +938,7 @@ async fn poll_reflects_decision_after_decide() {
 #[tokio::test]
 async fn poll_unknown_correlation_id_returns_404() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, _ledger) =
-        spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
         .get(format!("http://{}/pending/no-such-id", lite_addr))
@@ -982,11 +1013,9 @@ async fn poll_requires_bearer_token_when_configured() {
 #[tokio::test]
 async fn decide_token_required_when_configured() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, _ledger) = spawn_lite_with_decide_token(
-        format!("http://{}/mcp", upstream),
-        "op-secret".to_string(),
-    )
-    .await;
+    let (lite_addr, _ledger) =
+        spawn_lite_with_decide_token(format!("http://{}/mcp", upstream), "op-secret".to_string())
+            .await;
     let corr = park_wire_transfer(lite_addr).await;
 
     // No token → 401.
@@ -1164,11 +1193,9 @@ async fn list_pendings_bad_status_returns_400() {
 #[tokio::test]
 async fn list_pendings_requires_decide_token_when_configured() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, _ledger) = spawn_lite_with_decide_token(
-        format!("http://{}/mcp", upstream),
-        "op-secret".to_string(),
-    )
-    .await;
+    let (lite_addr, _ledger) =
+        spawn_lite_with_decide_token(format!("http://{}/mcp", upstream), "op-secret".to_string())
+            .await;
 
     let unauth = reqwest::Client::new()
         .get(format!("http://{}/pending", lite_addr))
@@ -1209,7 +1236,10 @@ async fn spawn_stub_slack() -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
             "/webhook",
             post(
                 |State(state): State<Arc<Mutex<Vec<String>>>>, body: axum::body::Bytes| async move {
-                    state.lock().unwrap().push(String::from_utf8_lossy(&body).to_string());
+                    state
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&body).to_string());
                     "ok"
                 },
             ),
@@ -1344,11 +1374,8 @@ async fn spawn_lite_with_registry(
 async fn multi_agent_routes_each_token_to_its_own_agent_id() {
     let upstream = spawn_stub_upstream().await;
     let registry = AgentRegistry::parse("agent-a:tok-a,agent-b:tok-b").unwrap();
-    let (lite_addr, ledger) = spawn_lite_with_registry(
-        format!("http://{}/mcp", upstream),
-        registry,
-    )
-    .await;
+    let (lite_addr, ledger) =
+        spawn_lite_with_registry(format!("http://{}/mcp", upstream), registry).await;
 
     // Agent A
     let resp = reqwest::Client::new()
@@ -1375,7 +1402,13 @@ async fn multi_agent_routes_each_token_to_its_own_agent_id() {
     assert_eq!(entries_a.len(), 1);
     assert_eq!(entries_b.len(), 1);
     // Cross-check: no entries tagged as the wrong agent.
-    assert!(ledger.entries_for_agent("bearer-agent").await.unwrap().is_empty());
+    assert!(
+        ledger
+            .entries_for_agent("bearer-agent")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1394,7 +1427,13 @@ async fn multi_agent_rejects_unknown_token() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 401);
     // Ledger should have no entries — auth fires before any pipeline work.
-    assert!(ledger.entries_for_agent("agent-a").await.unwrap().is_empty());
+    assert!(
+        ledger
+            .entries_for_agent("agent-a")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 // ---- Async-HIL callback URL --------------------------------------------------
@@ -1473,7 +1512,10 @@ async fn callback_url_rejected_when_no_allowlist_configured() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 400);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("allowlist"), "expected allowlist hint, got {body}");
+    assert!(
+        body.contains("allowlist"),
+        "expected allowlist hint, got {body}"
+    );
 }
 
 #[tokio::test]
@@ -1549,7 +1591,10 @@ async fn callback_url_fires_on_decide() {
     let body = &bodies[0];
     assert_eq!(body["correlation_id"], serde_json::Value::String(corr));
     assert_eq!(body["decision"], serde_json::Value::String("allow".into()));
-    assert_eq!(body["decider_note"], serde_json::Value::String("approved".into()));
+    assert_eq!(
+        body["decider_note"],
+        serde_json::Value::String("approved".into())
+    );
 }
 
 // ---- Outbound verdict webhooks ---------------------------------------------
@@ -1710,8 +1755,14 @@ async fn webhook_fires_park_then_decide_event_for_yellow_tier() {
     assert_eq!(decide.status().as_u16(), 200);
 
     let bodies = wait_for_webhooks(&captured, 2).await;
-    let decide_evt = bodies.iter().find(|b| b["event"] == "decide_allow").unwrap();
-    assert_eq!(decide_evt["correlation_id"], serde_json::Value::String(corr));
+    let decide_evt = bodies
+        .iter()
+        .find(|b| b["event"] == "decide_allow")
+        .unwrap();
+    assert_eq!(
+        decide_evt["correlation_id"],
+        serde_json::Value::String(corr)
+    );
     assert_eq!(decide_evt["intent_category"], "OperatorDecide");
 }
 
@@ -1765,11 +1816,7 @@ async fn rate_limit_gate_emits_429_with_json_body_and_ledger_row() {
     let policy = Arc::new(PolicyEngine::from_dir(&policies_dir(), 60).unwrap());
     let ledger = Arc::new(Ledger::open(":memory:").unwrap());
     let agents = Some(AgentRegistry::single("tok".into()));
-    let limiter = RateLimiter::from_config(RateLimitConfig {
-        qps: 1.0,
-        burst: 1,
-    })
-    .map(Arc::new);
+    let limiter = RateLimiter::from_config(RateLimitConfig { qps: 1.0, burst: 1 }).map(Arc::new);
 
     let state = Arc::new(AppState {
         policy,

@@ -200,7 +200,11 @@ impl std::fmt::Display for DecideError {
             DecideError::NotFound => write!(f, "pending not found"),
             DecideError::AlreadyDecided => write!(f, "pending already decided"),
             DecideError::InvalidDecision(d) => {
-                write!(f, "invalid decision {:?}: expected \"allow\" or \"deny\"", d)
+                write!(
+                    f,
+                    "invalid decision {:?}: expected \"allow\" or \"deny\"",
+                    d
+                )
             }
             DecideError::Sqlite(e) => write!(f, "sqlite error: {}", e),
         }
@@ -257,11 +261,7 @@ impl Ledger {
         // 50-page chunks, 50ms sleep between busy retries. Returns
         // `Ok(())` when the copy finishes; the page count is read off
         // the progress handle.
-        backup.run_to_completion(
-            50,
-            std::time::Duration::from_millis(50),
-            None,
-        )?;
+        backup.run_to_completion(50, std::time::Duration::from_millis(50), None)?;
         let pages = backup.progress().pagecount;
         Ok(pages)
     }
@@ -394,8 +394,8 @@ impl Ledger {
     pub async fn park_pending(&self, req: ParkRequest) -> rusqlite::Result<Pending> {
         let conn = self.conn.lock().await;
         let requested_at = Utc::now();
-        let review_reasons_json = serde_json::to_string(&req.review_reasons)
-            .unwrap_or_else(|_| "[]".to_string());
+        let review_reasons_json =
+            serde_json::to_string(&req.review_reasons).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
             "INSERT INTO pendings (correlation_id, agent_id, tool_type, method,
                                    review_reasons_json, requested_at, callback_url)
@@ -466,12 +466,7 @@ impl Ledger {
         let rows_affected = conn.execute(
             "UPDATE pendings SET decided_at = ?1, decision = ?2, decider_note = ?3
              WHERE correlation_id = ?4 AND decided_at IS NULL",
-            rusqlite::params![
-                decided_at.to_rfc3339(),
-                decision,
-                note,
-                correlation_id,
-            ],
+            rusqlite::params![decided_at.to_rfc3339(), decision, note, correlation_id,],
         )?;
         if rows_affected == 0 {
             // Belt-and-suspenders: under the connection mutex this
@@ -626,8 +621,12 @@ impl Ledger {
 /// block in enforce mode. In observe mode the request still forwards,
 /// but the ledger row carries one of these so the graduation report can
 /// count "what enforce would have denied".
-const WOULD_DENY_INTENTS: &[&str] =
-    &["PolicyDeny", "BrainDeny", "PromptInjection", "RateLimitDenied"];
+const WOULD_DENY_INTENTS: &[&str] = &[
+    "PolicyDeny",
+    "BrainDeny",
+    "PromptInjection",
+    "RateLimitDenied",
+];
 
 /// Cap on the per-agent breakdown in the graduation report.
 const TOP_AGENTS_LIMIT: usize = 10;
@@ -822,7 +821,11 @@ fn row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<LedgerEntry> {
         timestamp: DateTime::parse_from_rfc3339(&timestamp_str)
             .map(|t| t.with_timezone(&Utc))
             .map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
             })?,
         agent_id: row.get(3)?,
         method: row.get(4)?,
@@ -861,7 +864,10 @@ mod tests {
     async fn append_then_verify_passes() {
         let ledger = Ledger::open(":memory:").unwrap();
         for i in 0..5 {
-            ledger.append(sample(&format!("agent-{}", i), true)).await.unwrap();
+            ledger
+                .append(sample(&format!("agent-{}", i), true))
+                .await
+                .unwrap();
         }
         let v = ledger.verify().await.unwrap();
         assert!(v.valid);
@@ -905,11 +911,8 @@ mod tests {
         ledger.append(sample("a", true)).await.unwrap();
         {
             let conn = ledger.conn.lock().await;
-            conn.execute(
-                "UPDATE entries SET chain_version = 99 WHERE seq = 1",
-                [],
-            )
-            .unwrap();
+            conn.execute("UPDATE entries SET chain_version = 99 WHERE seq = 1", [])
+                .unwrap();
         }
         let v = ledger.verify().await.unwrap();
         assert!(!v.valid);
@@ -938,7 +941,10 @@ mod tests {
         let fetched = ledger.get_pending("abc-123").await.unwrap().unwrap();
         assert_eq!(fetched.agent_id, "agent-1");
         assert_eq!(fetched.tool_type, "transfer_funds");
-        assert_eq!(fetched.review_reasons, vec!["Wire transfers require approval"]);
+        assert_eq!(
+            fetched.review_reasons,
+            vec!["Wire transfers require approval"]
+        );
         assert!(fetched.decision.is_none());
     }
 
@@ -1054,7 +1060,11 @@ mod tests {
         let src = Ledger::open(src_path.to_str().unwrap()).unwrap();
         let mut originals = Vec::new();
         for i in 0..5 {
-            originals.push(src.append(sample(&format!("agent-{}", i), true)).await.unwrap());
+            originals.push(
+                src.append(sample(&format!("agent-{}", i), true))
+                    .await
+                    .unwrap(),
+            );
         }
 
         let dest_dir = tempfile::tempdir().unwrap();
@@ -1116,10 +1126,22 @@ mod tests {
     async fn graduation_stats_counts_would_deny_and_pend() {
         let ledger = Ledger::open(":memory:").unwrap();
         ledger.append(verdict("a", "Routine", true)).await.unwrap();
-        ledger.append(verdict("a", "PolicyDeny", false)).await.unwrap();
-        ledger.append(verdict("b", "BrainDeny", false)).await.unwrap();
-        ledger.append(verdict("a", "PendingReview", false)).await.unwrap();
-        ledger.append(verdict("a", "RateLimitDenied", false)).await.unwrap();
+        ledger
+            .append(verdict("a", "PolicyDeny", false))
+            .await
+            .unwrap();
+        ledger
+            .append(verdict("b", "BrainDeny", false))
+            .await
+            .unwrap();
+        ledger
+            .append(verdict("a", "PendingReview", false))
+            .await
+            .unwrap();
+        ledger
+            .append(verdict("a", "RateLimitDenied", false))
+            .await
+            .unwrap();
 
         let s = ledger.graduation_stats(None).await.unwrap();
         assert_eq!(s.total, 5);

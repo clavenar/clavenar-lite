@@ -41,6 +41,9 @@ Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `
 
 ## Conventions & invariants
 
+- **Formatting is an owning-CI gate.** Run `cargo fmt --all -- --check`
+  before pushing Rust changes; CI runs it before check, test, and clippy.
+
 - After adding or updating a feature, also update the relevant `MANUAL_TESTS*` file(s) when needed.
 
 - **Wire + chain are byte-compatible with the full edition.** A Lite-produced chain verifies under the production ledger; full-edition `governance.rego` runs verbatim here. Don't change the hash-chain serialization or the `PolicyInput` shape without matching the full edition.

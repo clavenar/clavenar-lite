@@ -94,17 +94,20 @@ async fn full_edition_rego_runs_verbatim() {
 
     let sql = engine.evaluate(input("sql_execute", 0.05, 0)).await;
     assert!(!sql.allow);
-    assert!(sql
-        .reasons
-        .iter()
-        .any(|r| r.contains("Direct execution of SQL queries is prohibited")));
+    assert!(
+        sql.reasons
+            .iter()
+            .any(|r| r.contains("Direct execution of SQL queries is prohibited"))
+    );
 
     let shell = engine.evaluate(input("shell_exec", 0.05, 0)).await;
     assert!(!shell.allow);
-    assert!(shell
-        .reasons
-        .iter()
-        .any(|r| r.contains("Direct shell access is prohibited")));
+    assert!(
+        shell
+            .reasons
+            .iter()
+            .any(|r| r.contains("Direct shell access is prohibited"))
+    );
 
     let hot = engine.evaluate(input("call_tool", 0.5, 0)).await;
     assert!(!hot.allow, "full edition denies intent 0.5: {:?}", hot);
@@ -118,9 +121,14 @@ async fn full_edition_rego_runs_verbatim() {
     // fail safe. Verbatim means Lite must reproduce that too.
     let wire = engine.evaluate(input("wire_transfer", 0.05, 0)).await;
     assert!(!wire.allow, "full edition wire_transfer: {:?}", wire);
-    assert!(wire
-        .review_reasons
-        .iter()
-        .any(|r| r.contains("Wire transfers require human approval")));
-    assert!(wire.reasons.is_empty(), "no deny reasons: {:?}", wire.reasons);
+    assert!(
+        wire.review_reasons
+            .iter()
+            .any(|r| r.contains("Wire transfers require human approval"))
+    );
+    assert!(
+        wire.reasons.is_empty(),
+        "no deny reasons: {:?}",
+        wire.reasons
+    );
 }

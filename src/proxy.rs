@@ -38,12 +38,12 @@
 //! agents; duplicates fail boot.
 
 use axum::{
+    Json, Router,
     body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -164,10 +164,11 @@ impl AgentRegistry {
             if token.is_empty() {
                 return Err(format!("agent registry entry {id:?} has empty token"));
             }
-            if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-                return Err(format!(
-                    "agent registry id {id:?} must match [A-Za-z0-9_-]"
-                ));
+            if !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(format!("agent registry id {id:?} must match [A-Za-z0-9_-]"));
             }
             if let Some(existing) = by_token.insert(token.to_string(), id.to_string()) {
                 return Err(format!(
@@ -712,10 +713,7 @@ async fn handle_decide_pending(
             return (
                 StatusCode::BAD_REQUEST,
                 clavenar_headers(&decide_corr, state.mode, false, false),
-                format!(
-                    "invalid decision {:?}: expected \"allow\" or \"deny\"",
-                    d
-                ),
+                format!("invalid decision {:?}: expected \"allow\" or \"deny\"", d),
             )
                 .into_response();
         }
@@ -757,7 +755,10 @@ async fn handle_decide_pending(
         // missing. Log loudly and still return success — losing the
         // audit row on a transient SQLite hiccup is the wrong reason
         // to surface a 500 for a decision the operator already made.
-        tracing::error!("decide-ledger append failed (decision still recorded): {}", e);
+        tracing::error!(
+            "decide-ledger append failed (decision still recorded): {}",
+            e
+        );
     }
 
     // Outbound SIEM webhook: fire one `decide_allow` or `decide_deny`
@@ -862,10 +863,7 @@ const CALLBACK_HEADER: &str = "X-Clavenar-Callback-URL";
 ///   malformed URL, or a URL outside the allowlist. The reason
 ///   string is surfaced verbatim in the 400 response body so the
 ///   partner can fix their config.
-fn validate_callback_url(
-    headers: &HeaderMap,
-    state: &AppState,
-) -> Result<Option<String>, String> {
+fn validate_callback_url(headers: &HeaderMap, state: &AppState) -> Result<Option<String>, String> {
     let raw = match headers.get(CALLBACK_HEADER).and_then(|v| v.to_str().ok()) {
         Some(s) if !s.is_empty() => s,
         _ => return Ok(None),
@@ -1323,8 +1321,8 @@ async fn handle_mcp(
     // Pass the upstream status + body through. Convert to axum's
     // expected types — `StatusCode::from_u16` wraps the upstream's
     // numeric status; the body rides through as `Bytes`.
-    let out_status = StatusCode::from_u16(status.as_u16())
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let out_status =
+        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     // Webhook emission: `would_deny` / `would_park` only fire in
     // observe mode (the enforce branches already short-circuited and
     // emitted their own event). In enforce + Green we fire `allow`.
@@ -1424,8 +1422,8 @@ async fn forward_control(
     if method == "tools/list" {
         crate::supply_chain::observe_tools_list(state, agent_id, &upstream_body).await;
     }
-    let out_status = StatusCode::from_u16(status.as_u16())
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let out_status =
+        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (
         out_status,
         clavenar_headers(correlation_id, state.mode, false, false),
@@ -1490,7 +1488,9 @@ mod tests {
         let policy = PolicyDecision {
             allow: false,
             reasons: vec![],
-            review_reasons: vec!["Review: Wire transfers require human approval before execution.".into()],
+            review_reasons: vec![
+                "Review: Wire transfers require human approval before execution.".into(),
+            ],
         };
         let s = build_reasoning(&brain, &policy);
         assert!(s.contains("review"));

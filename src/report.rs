@@ -155,7 +155,8 @@ fn recommendation(stats: &GraduationStats, chain_valid: bool) -> (bool, String) 
     if stats.total == 0 {
         return (
             false,
-            "NO DATA — no traffic observed yet; run representative traffic before graduating.".to_string(),
+            "NO DATA — no traffic observed yet; run representative traffic before graduating."
+                .to_string(),
         );
     }
     if stats.would_deny == 0 && stats.would_pend == 0 {
@@ -359,7 +360,10 @@ mod tests {
         // Flip a count in the structured report but leave the signed
         // canonical bytes + signature intact.
         signed.report.would_deny = 99;
-        assert!(matches!(verify_report(&signed, None), VerifyOutcome::Forged(_)));
+        assert!(matches!(
+            verify_report(&signed, None),
+            VerifyOutcome::Forged(_)
+        ));
     }
 
     #[test]

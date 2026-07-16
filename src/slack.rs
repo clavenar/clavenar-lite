@@ -45,11 +45,7 @@ pub fn format_pending_message(p: &Pending) -> String {
 /// POST the formatted message to the configured webhook URL. Errors
 /// are logged at `warn` level — the caller never sees them, because
 /// failing the park on a flaky Slack would be the wrong tradeoff.
-pub async fn notify_pending_parked(
-    http: &reqwest::Client,
-    webhook_url: &str,
-    pending: &Pending,
-) {
+pub async fn notify_pending_parked(http: &reqwest::Client, webhook_url: &str, pending: &Pending) {
     let body = serde_json::json!({ "text": format_pending_message(pending) });
     match http.post(webhook_url).json(&body).send().await {
         Ok(resp) if resp.status().is_success() => {}
@@ -81,9 +77,7 @@ mod tests {
             agent_id: "bearer-agent".to_string(),
             tool_type: "wire_transfer".to_string(),
             method: "call_tool".to_string(),
-            review_reasons: vec![
-                "Review: Wire transfers require human approval.".to_string(),
-            ],
+            review_reasons: vec!["Review: Wire transfers require human approval.".to_string()],
             requested_at: Utc::now(),
             decided_at: None,
             decision: None,

@@ -53,8 +53,13 @@ const INJECTION_NEEDLES: &[&str] = &[
 /// — these are the names that should never auto-pass without explicit
 /// per-agent allow-list configuration. Lite doesn't have per-agent
 /// allow-listing; if you need it, the full edition's policy bundle does.
-const DANGEROUS_TOOL_NAMES: &[&str] =
-    &["shell_exec", "sql_execute", "rm_rf", "drop_database", "exfiltrate"];
+const DANGEROUS_TOOL_NAMES: &[&str] = &[
+    "shell_exec",
+    "sql_execute",
+    "rm_rf",
+    "drop_database",
+    "exfiltrate",
+];
 
 /// Inspect a request and return a verdict. `tool_type` is the parsed
 /// `params.name` from MCP (or "unknown" if not call_tool); `payload_text`
@@ -80,7 +85,10 @@ pub fn inspect(tool_type: &str, payload_text: &str) -> HeuristicVerdict {
         (
             0.5,
             "DangerousTool".to_string(),
-            format!("Tool name '{}' is on the dangerous-tool denylist.", tool_type),
+            format!(
+                "Tool name '{}' is on the dangerous-tool denylist.",
+                tool_type
+            ),
         )
     } else {
         (
@@ -170,7 +178,10 @@ mod tests {
 
     #[test]
     fn dangerous_tool_blocks() {
-        let v = inspect("shell_exec", r#"{"params":{"name":"shell_exec","arguments":{"cmd":"ls"}}}"#);
+        let v = inspect(
+            "shell_exec",
+            r#"{"params":{"name":"shell_exec","arguments":{"cmd":"ls"}}}"#,
+        );
         assert!(!v.authorized);
         assert_eq!(v.intent_category, "DangerousTool");
         assert!(v.intent_score >= 0.2);

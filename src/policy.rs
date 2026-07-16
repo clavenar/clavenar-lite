@@ -140,7 +140,11 @@ impl PolicyEngine {
         if loaded == 0 {
             anyhow::bail!("no .rego files found in {}", policy_dir.display());
         }
-        tracing::info!("loaded {} rego policy file(s) from {}", loaded, policy_dir.display());
+        tracing::info!(
+            "loaded {} rego policy file(s) from {}",
+            loaded,
+            policy_dir.display()
+        );
 
         Ok(Self {
             engine: Mutex::new(engine),
@@ -160,8 +164,7 @@ impl PolicyEngine {
         if effective.recent_request_count == 0
             && let Some(agent_id) = &effective.agent_id
         {
-            effective.recent_request_count =
-                self.tracker.record_and_count(agent_id).await;
+            effective.recent_request_count = self.tracker.record_and_count(agent_id).await;
         }
 
         let input_json = match serde_json::to_string(&effective) {
@@ -171,7 +174,7 @@ impl PolicyEngine {
                     allow: false,
                     reasons: vec![format!("Policy input serialize error: {}", e)],
                     review_reasons: Vec::new(),
-                }
+                };
             }
         };
 
@@ -383,9 +386,10 @@ mod tests {
             })
             .await;
         assert!(!dec.allow);
-        assert!(dec
-            .reasons
-            .iter()
-            .any(|r| r.contains("Token velocity") || r.contains("velocity")));
+        assert!(
+            dec.reasons
+                .iter()
+                .any(|r| r.contains("Token velocity") || r.contains("velocity"))
+        );
     }
 }

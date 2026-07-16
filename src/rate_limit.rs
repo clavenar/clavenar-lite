@@ -65,7 +65,9 @@ impl TokenBucket {
     }
 
     fn refill(&mut self, now: Instant) {
-        let elapsed = now.saturating_duration_since(self.last_refill).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
         if elapsed <= 0.0 {
             return;
         }
@@ -150,7 +152,10 @@ mod tests {
     fn allows_under_burst_then_denies() {
         let limiter = RateLimiter::from_config(cfg(1.0, 3)).unwrap();
         for _ in 0..3 {
-            assert!(matches!(limiter.check("agent-a"), RateLimitOutcome::Allowed));
+            assert!(matches!(
+                limiter.check("agent-a"),
+                RateLimitOutcome::Allowed
+            ));
         }
         match limiter.check("agent-a") {
             RateLimitOutcome::Denied {
@@ -167,9 +172,18 @@ mod tests {
     #[test]
     fn agents_have_independent_buckets() {
         let limiter = RateLimiter::from_config(cfg(1.0, 1)).unwrap();
-        assert!(matches!(limiter.check("agent-a"), RateLimitOutcome::Allowed));
-        assert!(matches!(limiter.check("agent-a"), RateLimitOutcome::Denied { .. }));
-        assert!(matches!(limiter.check("agent-b"), RateLimitOutcome::Allowed));
+        assert!(matches!(
+            limiter.check("agent-a"),
+            RateLimitOutcome::Allowed
+        ));
+        assert!(matches!(
+            limiter.check("agent-a"),
+            RateLimitOutcome::Denied { .. }
+        ));
+        assert!(matches!(
+            limiter.check("agent-b"),
+            RateLimitOutcome::Allowed
+        ));
     }
 
     #[test]
@@ -177,7 +191,10 @@ mod tests {
         let limiter = RateLimiter::from_config(cfg(100.0, 2)).unwrap();
         assert!(matches!(limiter.check("a"), RateLimitOutcome::Allowed));
         assert!(matches!(limiter.check("a"), RateLimitOutcome::Allowed));
-        assert!(matches!(limiter.check("a"), RateLimitOutcome::Denied { .. }));
+        assert!(matches!(
+            limiter.check("a"),
+            RateLimitOutcome::Denied { .. }
+        ));
         std::thread::sleep(Duration::from_millis(50));
         assert!(matches!(limiter.check("a"), RateLimitOutcome::Allowed));
     }
@@ -194,7 +211,9 @@ mod tests {
         let limiter = RateLimiter::from_config(cfg(1000.0, 1)).unwrap();
         assert!(matches!(limiter.check("a"), RateLimitOutcome::Allowed));
         match limiter.check("a") {
-            RateLimitOutcome::Denied { retry_after_secs, .. } => {
+            RateLimitOutcome::Denied {
+                retry_after_secs, ..
+            } => {
                 assert_eq!(retry_after_secs, 1);
             }
             other => panic!("expected Denied, got {other:?}"),

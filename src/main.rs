@@ -12,6 +12,9 @@
 
 use chrono::Utc;
 use clap::{Parser, Subcommand};
+use clavenar_lite::ledger::Ledger;
+use clavenar_lite::policy::PolicyEngine;
+use clavenar_lite::proxy::{AgentRegistry, AppState, ClavenarMode, build_router};
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 use std::io::IsTerminal;
@@ -20,9 +23,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
-use clavenar_lite::ledger::Ledger;
-use clavenar_lite::policy::PolicyEngine;
-use clavenar_lite::proxy::{build_router, AgentRegistry, AppState, ClavenarMode};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -299,7 +299,11 @@ enum PendingAction {
     /// List parked (or decided, or all) pendings.
     List {
         /// Clavenar-lite base URL. Default `http://localhost:8088`.
-        #[arg(long, env = "CLAVENAR_LITE_URL", default_value = "http://localhost:8088")]
+        #[arg(
+            long,
+            env = "CLAVENAR_LITE_URL",
+            default_value = "http://localhost:8088"
+        )]
         endpoint: String,
         /// Operator bearer token. Required if clavenar-lite was booted
         /// with `--decide-token`. Env `CLAVENAR_LITE_DECIDE_TOKEN`.
@@ -326,7 +330,11 @@ enum PendingAction {
         /// Correlation id (returned in the 202 body and the
         /// `X-Clavenar-Correlation-Id` header).
         id: String,
-        #[arg(long, env = "CLAVENAR_LITE_URL", default_value = "http://localhost:8088")]
+        #[arg(
+            long,
+            env = "CLAVENAR_LITE_URL",
+            default_value = "http://localhost:8088"
+        )]
         endpoint: String,
         /// Agent bearer token (poll path). Env `CLAVENAR_LITE_TOKEN`.
         #[arg(long, env = "CLAVENAR_LITE_TOKEN")]
@@ -340,7 +348,11 @@ enum PendingAction {
     /// ledger.
     Decide {
         id: String,
-        #[arg(long, env = "CLAVENAR_LITE_URL", default_value = "http://localhost:8088")]
+        #[arg(
+            long,
+            env = "CLAVENAR_LITE_URL",
+            default_value = "http://localhost:8088"
+        )]
         endpoint: String,
         #[arg(long, env = "CLAVENAR_LITE_DECIDE_TOKEN")]
         decide_token: Option<String>,
@@ -361,8 +373,7 @@ async fn main() {
     // line (current span fields + active span stack) — same env knob
     // every other clavenar-* service exposes so one log-shipping config
     // ingests any component.
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     match std::env::var("CLAVENAR_LOG_FORMAT").as_deref() {
         Ok("json") => tracing_subscriber::fmt()
             .with_env_filter(filter)
@@ -443,7 +454,11 @@ async fn main() {
             let path = ledger.unwrap_or_else(|| "./clavenar-lite.db".into());
             run_backup(path, output).await
         }
-        Command::Restore { input, ledger, force } => {
+        Command::Restore {
+            input,
+            ledger,
+            force,
+        } => {
             let path = ledger.unwrap_or_else(|| "./clavenar-lite.db".into());
             run_restore(input, path, force).await
         }
@@ -825,7 +840,9 @@ async fn run_start(cfg: StartConfig) -> i32 {
     // and the request fast-path stays a single Option::is_none check.
     let rate_limiter = {
         let qps = cfg.rate_limit_qps.unwrap_or(0.0).max(0.0);
-        let burst = cfg.rate_limit_burst.unwrap_or_else(|| qps.ceil().max(1.0) as u32);
+        let burst = cfg
+            .rate_limit_burst
+            .unwrap_or_else(|| qps.ceil().max(1.0) as u32);
         let config = clavenar_lite::rate_limit::RateLimitConfig { qps, burst };
         if config.is_enabled() {
             tracing::info!(qps, burst, "rate-limit per-agent enabled");
@@ -898,14 +915,33 @@ async fn run_start(cfg: StartConfig) -> i32 {
     tracing::info!(
         "clavenar-lite listening on http://{} (mode={}, upstream={}, policies={}, ledger={}, auth={}, decide_auth={}, slack_alerts={}, verdict_webhook={}, upstream_timeout={}s)",
         addr,
-        match cfg.mode { ClavenarMode::Enforce => "enforce", ClavenarMode::Observe => "observe" },
+        match cfg.mode {
+            ClavenarMode::Enforce => "enforce",
+            ClavenarMode::Observe => "observe",
+        },
         cfg.upstream,
         cfg.policies.display(),
         cfg.ledger_path,
-        if cfg.token.is_some() { "bearer-token" } else { "open" },
-        if cfg.decide_token.is_some() { "bearer-token" } else { "open" },
-        if cfg.slack_webhook_url.is_some() { "enabled" } else { "off" },
-        if cfg.webhook_url.is_some() { "enabled" } else { "off" },
+        if cfg.token.is_some() {
+            "bearer-token"
+        } else {
+            "open"
+        },
+        if cfg.decide_token.is_some() {
+            "bearer-token"
+        } else {
+            "open"
+        },
+        if cfg.slack_webhook_url.is_some() {
+            "enabled"
+        } else {
+            "off"
+        },
+        if cfg.webhook_url.is_some() {
+            "enabled"
+        } else {
+            "off"
+        },
         cfg.upstream_timeout.as_secs(),
     );
 
@@ -1058,7 +1094,12 @@ async fn run_restore(input: PathBuf, ledger_path: String, force: bool) -> i32 {
     ));
 
     if let Err(e) = std::fs::copy(&input_str, &tmp) {
-        eprintln!("error: copy {} -> {} failed: {}", input_str, tmp.display(), e);
+        eprintln!(
+            "error: copy {} -> {} failed: {}",
+            input_str,
+            tmp.display(),
+            e
+        );
         let _ = std::fs::remove_file(&tmp);
         return 1;
     }
@@ -1077,7 +1118,10 @@ async fn run_restore(input: PathBuf, ledger_path: String, force: bool) -> i32 {
     let restored = match Ledger::open(&ledger_path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("error: target {} won't reopen post-restore: {}", ledger_path, e);
+            eprintln!(
+                "error: target {} won't reopen post-restore: {}",
+                ledger_path, e
+            );
             return 2;
         }
     };
@@ -1205,7 +1249,9 @@ async fn run_graduate_report(
     output: Option<PathBuf>,
     format: ReportFormat,
 ) -> i32 {
-    use clavenar_lite::report::{GraduationReport, SignedGraduationReport, sign_report, unsigned_report};
+    use clavenar_lite::report::{
+        GraduationReport, SignedGraduationReport, sign_report, unsigned_report,
+    };
 
     let since_dt = match since.as_deref().map(parse_since).transpose() {
         Ok(v) => v,
@@ -1308,7 +1354,11 @@ fn render_graduation_text(signed: &clavenar_lite::report::SignedGraduationReport
     let _ = writeln!(
         out,
         "  chain:     {}",
-        if r.ledger_chain_valid { "VALID" } else { "INVALID" }
+        if r.ledger_chain_valid {
+            "VALID"
+        } else {
+            "INVALID"
+        }
     );
     let _ = writeln!(
         out,
