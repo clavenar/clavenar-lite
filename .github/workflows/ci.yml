@@ -10,16 +10,17 @@ jobs:
     name: cargo check / test / clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
+          toolchain: 1.97.0
           components: rustfmt, clippy
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: cargo check
         run: cargo check --all-targets
@@ -39,7 +40,7 @@ jobs:
     name: smoke-e2e (boot + verdicts + audit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       # Tag the locally-built image under the same coordinates the
       # smoke script expects (`ghcr.io/clavenar/clavenar-lite:ci`)
@@ -62,9 +63,9 @@ jobs:
     name: cargo-deny + cyclonedx SBOM
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check all
 
@@ -74,16 +75,16 @@ jobs:
       # root; we upload it as a build artifact so reviewers can diff dep
       # graphs across PRs and so a future release pipeline can attach it
       # to GitHub releases.
-      - uses: cargo-bins/cargo-binstall@main
+      - uses: cargo-bins/cargo-binstall@ead08b90bd7b2e6d81963fb9cf0b7239f66d5db4 # main
 
       - name: install cargo-cyclonedx
-        run: cargo binstall --no-confirm cargo-cyclonedx
+        run: cargo binstall --no-confirm cargo-cyclonedx@0.5.9
 
       - name: generate SBOM
         run: cargo cyclonedx --format json --describe crate
 
       - name: upload SBOM
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: sbom-${{ github.event.repository.name }}-${{ github.sha }}
           path: '*.cdx.json'

@@ -12,7 +12,7 @@
 # bind-mount a volume for persistence.
 
 # ---------- builder ----------
-FROM rust:1-bookworm AS builder
+FROM rust:1-bookworm@sha256:8fa55b2f3ddf97471ab6a767bfa3f37e6bad0986ba823e75fea57e2a2a5c3073 AS builder
 
 WORKDIR /build
 
@@ -26,7 +26,7 @@ COPY policies ./policies
 RUN cargo build --release --locked --bin clavenar-lite
 
 # ---------- runtime ----------
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 
 # ca-certificates so reqwest can do TLS to upstream APIs; tini as
 # PID 1 for clean signal handling in container runtimes that don't

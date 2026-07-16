@@ -105,9 +105,13 @@ test_static_binary() {
         apt-get update -qq
         apt-get install -y -qq --no-install-recommends curl ca-certificates file >/dev/null
         V='$VERSION'
-        URL=\"https://github.com/clavenar/clavenar-lite/releases/download/v\${V}/clavenar-lite-\${V}-x86_64-linux-musl.tar.gz\"
+        ASSET=\"clavenar-lite-\${V}-x86_64-linux-musl.tar.gz\"
+        URL=\"https://github.com/clavenar/clavenar-lite/releases/download/v\${V}/\${ASSET}\"
         echo \"GET \$URL\"
-        curl -fsSL \"\$URL\" | tar -xz
+        curl -fsSL \"\$URL\" -o \"\$ASSET\"
+        curl -fsSL \"\$URL.sha256\" -o \"\$ASSET.sha256\"
+        sha256sum -c \"\$ASSET.sha256\"
+        tar -xzf \"\$ASSET\"
         file ./clavenar-lite | grep -Eq 'statically linked|static-pie linked' || {
             echo 'binary is NOT statically linked — musl build is broken'
             file ./clavenar-lite
