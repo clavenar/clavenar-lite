@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clavenar.com/contracts/retry-separation-v1.schema.json",
+  "title": "Clavenar retry separation fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "contract", "decisionSelector", "cases", "invariants"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "contract": {"const": "clavenar.retry-separation/v1"},
+    "decisionSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["header", "value", "idempotencyHeader", "requiresCanonicalUuid", "requiresExclusiveSelection"],
+      "properties": {
+        "header": {"const": "x-clavenar-decision-contract"},
+        "value": {"const": "clavenar.decision/v1"},
+        "idempotencyHeader": {"const": "x-clavenar-idempotency-id"},
+        "requiresCanonicalUuid": {"const": true},
+        "requiresExclusiveSelection": {"const": true}
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 10,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "surface", "classification", "automaticTransportRetry", "sameIdempotencyIdAcrossAttempts", "requestResubmitted", "maximumEffectAttempts"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "surface": {"type": "string", "minLength": 1},
+          "classification": {"enum": ["side_effect_free_decision", "lookup_only", "effect_capable_execution", "legacy_effect_capable_execution", "invalid", "caller_driven_replay", "non_executable_uncertain", "delivery_only"]},
+          "automaticTransportRetry": {"type": "boolean"},
+          "sameIdempotencyIdAcrossAttempts": {"type": "boolean"},
+          "requestResubmitted": {"type": "boolean"},
+          "maximumEffectAttempts": {"type": "integer", "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["onlyExclusiveDecisionRequestsMayRetryAutomatically", "decisionRetriesRetainOriginalCanonicalIdempotencyId", "executorFailuresNeverEnterTransportRetryLoop", "upstreamFailuresNeverEnterTransportRetryLoop", "pollingNeverResubmitsOriginalRequest", "receiptDeliveryNeverReexecutesEffect"],
+      "properties": {
+        "onlyExclusiveDecisionRequestsMayRetryAutomatically": {"const": true},
+        "decisionRetriesRetainOriginalCanonicalIdempotencyId": {"const": true},
+        "executorFailuresNeverEnterTransportRetryLoop": {"const": true},
+        "upstreamFailuresNeverEnterTransportRetryLoop": {"const": true},
+        "pollingNeverResubmitsOriginalRequest": {"const": true},
+        "receiptDeliveryNeverReexecutesEffect": {"const": true}
+      }
+    }
+  }
+}

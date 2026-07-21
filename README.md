@@ -346,12 +346,11 @@ automatically — no manual SQL surgery needed.
 
 `POST /mcp` with a JSON-RPC body:
 
-`/mcp` is the explicit server-execution compatibility route. Lite rejects
-`clavenar.decision/v1`, partial/unknown decision selectors, and the legacy
-execution selector before policy, ledger, or upstream access. Use the full
-Proxy for SDK-governed side-effect-free authorization until Lite's shared
-durable decision/receipt path is available; a governed SDK request is never
-silently reinterpreted as server execution.
+`/mcp` keeps server execution and decision as separate contracts. An explicit
+`clavenar.decision/v1` request is side-effect-free and returns only its
+decision; partial, unknown, or mixed selectors fail before policy, ledger, or
+upstream access. A governed SDK request is never silently reinterpreted as
+server execution.
 
 Authenticated callers can opt into durable server execution by pairing
 `x-clavenar-server-execution-contract: clavenar.server-execution/v1` with a
@@ -362,6 +361,10 @@ stage before returning. An exact completed retry returns the retained bytes
 with `x-clavenar-server-execution-replayed: true`; a changed request conflicts,
 and an interrupted in-flight identity returns `server_execution_uncertain`
 without another upstream attempt. Anonymous mode cannot select this contract.
+Lite makes exactly one upstream attempt for both selected and legacy server
+execution. It never automatically retries an effect-capable request; callers
+recover a selected request only through its durable completed replay or
+explicit uncertain outcome.
 
 ```json
 {

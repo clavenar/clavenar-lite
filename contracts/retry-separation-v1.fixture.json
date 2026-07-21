@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "contract": "clavenar.retry-separation/v1",
+  "decisionSelector": {
+    "header": "x-clavenar-decision-contract",
+    "value": "clavenar.decision/v1",
+    "idempotencyHeader": "x-clavenar-idempotency-id",
+    "requiresCanonicalUuid": true,
+    "requiresExclusiveSelection": true
+  },
+  "cases": [
+    {
+      "id": "explicit-side-effect-free-decision",
+      "surface": "POST /mcp",
+      "classification": "side_effect_free_decision",
+      "automaticTransportRetry": true,
+      "sameIdempotencyIdAcrossAttempts": true,
+      "requestResubmitted": true,
+      "maximumEffectAttempts": 0
+    },
+    {
+      "id": "pending-status-poll",
+      "surface": "GET /pending/{correlation_id}",
+      "classification": "lookup_only",
+      "automaticTransportRetry": false,
+      "sameIdempotencyIdAcrossAttempts": true,
+      "requestResubmitted": false,
+      "maximumEffectAttempts": 0
+    },
+    {
+      "id": "sdk-registered-executor",
+      "surface": "registered executor callback",
+      "classification": "effect_capable_execution",
+      "automaticTransportRetry": false,
+      "sameIdempotencyIdAcrossAttempts": true,
+      "requestResubmitted": false,
+      "maximumEffectAttempts": 1
+    },
+    {
+      "id": "proxy-selected-server-execution",
+      "surface": "Proxy POST /mcp",
+      "classification": "effect_capable_execution",
+      "automaticTransportRetry": false,
+      "sameIdempotencyIdAcrossAttempts": true,
+      "requestResubmitted": false,
+      "maximumEffectAttempts": 1
+    },
+    {
+      "id": "lite-selected-server-execution",
+      "surface": "Lite POST /mcp",
+      "classification": "effect_capable_execution",
+      "automaticTransportRetry": false,
+      "sameIdempotencyIdAcrossAttempts": true,
+      "requestResubmitted": false,
+      "maximumEffectAttempts": 1
+    },
+    {
+      "id": "legacy-unselected-mcp",
+      "surface": "POST /mcp",
+      "classification": "legacy_effect_capable_execution",
+      "automaticTransportRetry": false,
+      "sameIdempotencyIdAcrossAttempts": false,
+      "requestResubmitted": false,
+      "maximumEffectAttempts": 1
+    },
+    {
+      "id": "invalid-partial-mixed-or-unknown-selector",
+      "surface": "POST /mcp",
+      "classification": "invalid",
+      "automaticTransportRetry": false,
+      "sameIdempotencyIdAcrossAttempts": false,
+      "requestResubmitted": false,
+      "maximumEffectAttempts": 0
+    },
+    {
+      "id": "completed-server-execution-replay",
+      "surface": "durable result lookup",
+      "classification": "caller_driven_replay",
+      "automaticTransportRetry": false,
+      "sameIdempotencyIdAcrossAttempts": true,
+      "requestResubmitted": false,
+      "maximumEffectAttempts": 0
+    },
+    {
+      "id": "uncertain-server-execution-replay",
+      "surface": "durable in-flight lookup",
+      "classification": "non_executable_uncertain",
+      "automaticTransportRetry": false,
+      "sameIdempotencyIdAcrossAttempts": true,
+      "requestResubmitted": false,
+      "maximumEffectAttempts": 0
+    },
+    {
+      "id": "terminal-receipt-outbox-delivery",
+      "surface": "forensic outbox",
+      "classification": "delivery_only",
+      "automaticTransportRetry": true,
+      "sameIdempotencyIdAcrossAttempts": true,
+      "requestResubmitted": true,
+      "maximumEffectAttempts": 0
+    }
+  ],
+  "invariants": {
+    "onlyExclusiveDecisionRequestsMayRetryAutomatically": true,
+    "decisionRetriesRetainOriginalCanonicalIdempotencyId": true,
+    "executorFailuresNeverEnterTransportRetryLoop": true,
+    "upstreamFailuresNeverEnterTransportRetryLoop": true,
+    "pollingNeverResubmitsOriginalRequest": true,
+    "receiptDeliveryNeverReexecutesEffect": true
+  }
+}

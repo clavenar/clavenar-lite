@@ -1923,6 +1923,26 @@ mod tests {
     }
 
     #[test]
+    fn packaged_retry_fixture_prohibits_automatic_execution_retry() {
+        let fixture: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../contracts/retry-separation-v1.fixture.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["contract"], "clavenar.retry-separation/v1");
+        let cases = fixture["cases"].as_array().unwrap();
+        let lite = cases
+            .iter()
+            .find(|case| case["id"] == "lite-selected-server-execution")
+            .unwrap();
+        assert_eq!(lite["automaticTransportRetry"], false);
+        assert_eq!(lite["maximumEffectAttempts"], 1);
+        assert_eq!(
+            fixture["invariants"]["upstreamFailuresNeverEnterTransportRetryLoop"],
+            true
+        );
+    }
+
+    #[test]
     fn server_execution_selector_is_paired_canonical_and_exclusive() {
         let id = "7a7adf0c-0ef7-45aa-a801-598e38095dfa";
         let mut headers = HeaderMap::new();
