@@ -84,7 +84,12 @@ sequenceDiagram
     CLI-->>Op: exit 0
 ```
 
-## 2. Green-tier `POST /mcp` — bearer auth, rate-limit, brain + policy, forward
+## 2. Green-tier `POST /mcp` — explicit server execution
+
+The route is server-executed only when decision headers are absent. Any
+complete, partial, unknown, or legacy decision/execution selector is rejected
+before rate limiting, policy, ledger mutation, or upstream access, so an SDK
+governed request cannot accidentally cause a Lite effect.
 
 The fast path: an authenticated request whose tool name and payload
 clear both the heuristic Brain and the Rego policy is forwarded

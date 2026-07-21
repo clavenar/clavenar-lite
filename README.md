@@ -346,6 +346,13 @@ automatically — no manual SQL surgery needed.
 
 `POST /mcp` with a JSON-RPC body:
 
+`/mcp` is the explicit server-execution compatibility route. Lite rejects
+`clavenar.decision/v1`, partial/unknown decision selectors, and the legacy
+execution selector before policy, ledger, or upstream access. Use the full
+Proxy for SDK-governed side-effect-free authorization until Lite's shared
+durable decision/receipt path is available; a governed SDK request is never
+silently reinterpreted as server execution.
+
 ```json
 {
   "jsonrpc": "2.0",

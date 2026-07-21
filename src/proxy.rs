@@ -59,6 +59,9 @@ use crate::rate_limit::{RateLimitOutcome, RateLimiter};
 use crate::webhook::{self, WebhookEvent};
 
 const CORRELATION_HEADER: &str = "X-Clavenar-Correlation-Id";
+const DECISION_CONTRACT_HEADER: &str = "x-clavenar-decision-contract";
+const LEGACY_EXECUTION_CONTRACT_HEADER: &str = "x-clavenar-execution-contract";
+const IDEMPOTENCY_ID_HEADER: &str = "x-clavenar-idempotency-id";
 
 /// Stamp the standard clavenar response headers on a response.
 /// `correlation_id` is included unconditionally — even auth-fail and
@@ -1000,6 +1003,30 @@ async fn handle_mcp(
         }
         None => "anonymous".to_string(),
     };
+
+    // Lite's `/mcp` route is explicitly server-executed. A governed SDK
+    // decision selector must never be ignored here, because doing so would
+    // turn a zero-effect authorization request into an upstream effect. Lite
+    // gains the shared decision/receipt path only with the later durable
+    // pending contract; until then every complete, partial, unknown, or legacy
+    // selector fails before rate limiting, policy work, ledger mutation, or
+    // upstream access.
+    if headers.contains_key(DECISION_CONTRACT_HEADER)
+        || headers.contains_key(LEGACY_EXECUTION_CONTRACT_HEADER)
+        || headers.contains_key(IDEMPOTENCY_ID_HEADER)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            clavenar_headers(&correlation_id, state.mode, false, false),
+            Json(serde_json::json!({
+                "error": "side_effect_free_decision_unsupported",
+                "decision_contract": "clavenar.decision/v1",
+                "server_execution_route": "/mcp",
+                "correlation_id": correlation_id,
+            })),
+        )
+            .into_response();
+    }
 
     // Rate-limit gate. Runs after agent_id is known so the denial
     // names the right identity in the audit row + JSON body, but

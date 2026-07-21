@@ -12,6 +12,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -56,6 +57,28 @@ async fn spawn_stub_upstream() -> SocketAddr {
     addr
 }
 
+async fn spawn_counting_upstream() -> (SocketAddr, Arc<AtomicUsize>) {
+    let effects = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&effects);
+    let app = Router::new().route(
+        "/mcp",
+        post(move || {
+            let counted = Arc::clone(&counted);
+            async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                axum::Json(serde_json::json!({"result": {"ok": true}}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (addr, effects)
+}
+
 /// Stand up a clavenar-lite proxy on an ephemeral port pointing at
 /// `upstream_url`. Returns the clavenar-lite addr + a handle to the
 /// embedded ledger so tests can assert what got written.
@@ -64,6 +87,71 @@ async fn spawn_lite(
     bearer_token: Option<String>,
 ) -> (SocketAddr, Arc<Ledger>) {
     spawn_lite_full(upstream_url, bearer_token, None, ClavenarMode::Enforce).await
+}
+
+#[tokio::test]
+async fn decision_selectors_fail_before_any_server_execution_effect() {
+    let (upstream, effects) = spawn_counting_upstream().await;
+    let (lite, ledger) = spawn_lite(format!("http://{upstream}/mcp"), None).await;
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "cfcc8767-4c73-41cc-8ece-b855863924c4",
+        "method": "tools/call",
+        "params": {"name": "payments.transfer", "arguments": {"amount": 100}}
+    });
+
+    for headers in [
+        vec![
+            ("x-clavenar-decision-contract", "clavenar.decision/v1"),
+            (
+                "x-clavenar-idempotency-id",
+                "cfcc8767-4c73-41cc-8ece-b855863924c4",
+            ),
+        ],
+        vec![("x-clavenar-decision-contract", "clavenar.decision/v1")],
+        vec![
+            ("x-clavenar-decision-contract", "clavenar.decision/v999"),
+            (
+                "x-clavenar-idempotency-id",
+                "cfcc8767-4c73-41cc-8ece-b855863924c4",
+            ),
+        ],
+        vec![
+            ("x-clavenar-execution-contract", "clavenar.execution/v1"),
+            (
+                "x-clavenar-idempotency-id",
+                "cfcc8767-4c73-41cc-8ece-b855863924c4",
+            ),
+        ],
+    ] {
+        let mut request = client.post(format!("http://{lite}/mcp")).json(&body);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(error["error"], "side_effect_free_decision_unsupported");
+    }
+
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    assert!(
+        ledger
+            .entries_for_agent("anonymous")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let response = client
+        .post(format!("http://{lite}/mcp"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
 }
 
 async fn spawn_lite_with_mode(

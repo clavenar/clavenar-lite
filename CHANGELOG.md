@@ -6,6 +6,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- `/mcp` now rejects complete, partial, unknown, and legacy governed-decision
+  selectors before rate limiting, policy, ledger mutation, or upstream access.
+  The route remains explicitly server-executed only when decision headers are
+  absent, preventing an SDK decision request from being executed accidentally.
+
 ## [0.6.0] - 2026-05-12
 
 Outbound verdict webhook release. Pairs clavenar-lite's audit ledger
