@@ -27,7 +27,7 @@
 //! edition's `HashableEntry`; do not diverge.
 
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -87,6 +87,53 @@ pub struct LogRequest {
     /// thread a correlation id continue to work.
     #[serde(default)]
     pub correlation_id: Option<String>,
+}
+
+/// Exact identity and payload binding for the opt-in durable server-execution
+/// contract. The submitted and effective digests are separate so a future
+/// approved modification can retain the caller's original retry identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerExecutionBinding {
+    pub agent_id: String,
+    pub idempotency_id: Uuid,
+    pub correlation_id: String,
+    pub route: String,
+    pub method: String,
+    pub tool_name: String,
+    pub submitted_request_sha256: String,
+    pub effective_request_sha256: String,
+}
+
+impl ServerExecutionBinding {
+    fn execution_id(&self) -> Uuid {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "clavenar.server-execution/v1\0{}\0{}",
+                self.agent_id, self.idempotency_id
+            )
+            .as_bytes(),
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ServerExecutionCompleted {
+    pub execution_id: String,
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub body: Vec<u8>,
+    pub result_sha256: String,
+    pub receipt_json: String,
+}
+
+#[derive(Debug)]
+pub enum ServerExecutionOutcome {
+    Missing,
+    Started,
+    Completed(ServerExecutionCompleted),
+    Uncertain,
+    Conflict,
 }
 
 /// V1 hash input. Identical layout to `clavenar_ledger::HashableEntryV1`
@@ -272,69 +319,169 @@ impl Ledger {
     /// `clavenar_ledger::append_entry`.
     pub async fn append(&self, req: LogRequest) -> rusqlite::Result<LedgerEntry> {
         let conn = self.conn.lock().await;
+        append_on_connection(&conn, req)
+    }
 
-        // Look up latest entry to seed seq + prev_hash. Empty table →
-        // seq=1, genesis prev_hash.
-        let (next_seq, prev_hash): (i64, String) = conn
-            .query_row(
-                "SELECT seq, entry_hash FROM entries ORDER BY seq DESC LIMIT 1",
-                [],
-                |row| Ok((row.get::<_, i64>(0)? + 1, row.get::<_, String>(1)?)),
-            )
-            .unwrap_or((1, GENESIS_PREV_HASH.to_string()));
+    /// Read a retained server execution without changing state. Used before
+    /// policy/HIL work so completed retries return the original bytes and an
+    /// interrupted attempt cannot enter another execution path.
+    pub async fn inspect_server_execution(
+        &self,
+        binding: &ServerExecutionBinding,
+    ) -> rusqlite::Result<ServerExecutionOutcome> {
+        let conn = self.conn.lock().await;
+        inspect_server_execution(&conn, binding)
+    }
 
-        let id = Uuid::new_v4();
-        let timestamp = Utc::now();
-
-        // Build a typed entry first; `recompute_for_version` then hashes
-        // off the same view that `verify_chain` will read back from
-        // disk. Single source of truth for both write and verify paths.
-        let mut entry = LedgerEntry {
-            id,
-            timestamp,
-            agent_id: req.agent_id,
-            method: req.method,
-            intent_category: req.intent_category,
-            authorized: req.authorized,
-            reasoning: req.reasoning,
-            policy_decision: req.policy_decision,
-            seq: next_seq,
-            prev_hash,
-            entry_hash: String::new(),
-            chain_version: CURRENT_CHAIN_VERSION,
-            correlation_id: req.correlation_id,
-        };
-        entry.entry_hash = recompute_for_version(entry.chain_version, &entry)
-            .expect("CURRENT_CHAIN_VERSION must be supported by this binary");
-
-        let policy_decision_json = entry
-            .policy_decision
-            .as_ref()
-            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "null".to_string()));
-
-        conn.execute(
-            "INSERT INTO entries (id, seq, timestamp, agent_id, method, intent_category,
-                                  authorized, reasoning, policy_decision, prev_hash, entry_hash,
-                                  chain_version, correlation_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+    /// Atomically commit exact intent plus the in-flight marker and its first
+    /// hash-chain stage before the caller is allowed to contact the upstream.
+    pub async fn begin_server_execution(
+        &self,
+        binding: &ServerExecutionBinding,
+    ) -> rusqlite::Result<ServerExecutionOutcome> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        match inspect_server_execution(&tx, binding)? {
+            ServerExecutionOutcome::Missing => {}
+            outcome => return Ok(outcome),
+        }
+        let execution_id = binding.execution_id();
+        tx.execute(
+            "INSERT INTO server_executions
+             (agent_id, idempotency_id, execution_id, correlation_id, route, method,
+              tool_name, submitted_request_sha256, effective_request_sha256, state, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'in_flight', ?10)",
             rusqlite::params![
-                entry.id.to_string(),
-                entry.seq,
-                entry.timestamp.to_rfc3339(),
-                entry.agent_id,
-                entry.method,
-                entry.intent_category,
-                entry.authorized as i64,
-                entry.reasoning,
-                policy_decision_json,
-                entry.prev_hash,
-                entry.entry_hash,
-                entry.chain_version,
-                entry.correlation_id,
+                binding.agent_id,
+                binding.idempotency_id.to_string(),
+                execution_id.to_string(),
+                binding.correlation_id,
+                binding.route,
+                binding.method,
+                binding.tool_name,
+                binding.submitted_request_sha256,
+                binding.effective_request_sha256,
+                Utc::now().to_rfc3339(),
             ],
         )?;
+        append_on_connection(
+            &tx,
+            LogRequest {
+                agent_id: binding.agent_id.clone(),
+                method: binding.method.clone(),
+                intent_category: "ServerExecutionIntent".to_string(),
+                authorized: false,
+                reasoning: "durable server execution intent committed before upstream attempt"
+                    .to_string(),
+                policy_decision: Some(serde_json::json!({
+                    "contract": "clavenar.server-execution/v1",
+                    "stage": "execution.intent",
+                    "execution_id": execution_id,
+                    "idempotency_id": binding.idempotency_id,
+                    "route": binding.route,
+                    "tool_name": binding.tool_name,
+                    "submitted_request_sha256": binding.submitted_request_sha256,
+                    "effective_request_sha256": binding.effective_request_sha256,
+                    "state": "in_flight",
+                })),
+                correlation_id: Some(binding.correlation_id.clone()),
+            },
+        )?;
+        tx.commit()?;
+        Ok(ServerExecutionOutcome::Started)
+    }
 
-        Ok(entry)
+    /// Commit the exact received response, terminal receipt, forensic outbox
+    /// row, and completion chain stage in one SQLite transaction.
+    pub async fn complete_server_execution(
+        &self,
+        binding: &ServerExecutionBinding,
+        status: u16,
+        content_type: Option<String>,
+        body: Vec<u8>,
+    ) -> rusqlite::Result<ServerExecutionCompleted> {
+        let execution_id = binding.execution_id();
+        let outbox_event_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("clavenar.server-execution/v1\0outbox\0{execution_id}").as_bytes(),
+        );
+        let result_sha256 = format!("sha256:{}", hex::encode(Sha256::digest(&body)));
+        let result = serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_else(|_| {
+            serde_json::Value::String(String::from_utf8_lossy(&body).into_owned())
+        });
+        let receipt = serde_json::json!({
+            "contract": "clavenar.server-execution/v1",
+            "stage": "execution.completed",
+            "execution_id": execution_id,
+            "idempotency_id": binding.idempotency_id,
+            "caller": binding.agent_id,
+            "route": binding.route,
+            "method": binding.method,
+            "tool_name": binding.tool_name,
+            "submitted_request_sha256": binding.submitted_request_sha256,
+            "effective_request_sha256": binding.effective_request_sha256,
+            "response_status": status,
+            "result_sha256": result_sha256,
+            "result": result,
+            "outbox_event_id": outbox_event_id,
+        });
+        let receipt_json = receipt.to_string();
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE server_executions
+             SET state = 'completed', response_status = ?1, response_content_type = ?2,
+                 response_body = ?3, result_sha256 = ?4, receipt_json = ?5, completed_at = ?6
+             WHERE agent_id = ?7 AND idempotency_id = ?8 AND state = 'in_flight'
+               AND effective_request_sha256 = ?9",
+            rusqlite::params![
+                status,
+                content_type,
+                body,
+                result_sha256,
+                receipt_json,
+                now,
+                binding.agent_id,
+                binding.idempotency_id.to_string(),
+                binding.effective_request_sha256,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        tx.execute(
+            "INSERT INTO server_execution_outbox
+             (event_id, execution_id, payload_json, created_at, delivered_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            rusqlite::params![
+                outbox_event_id.to_string(),
+                execution_id.to_string(),
+                receipt_json,
+                now,
+            ],
+        )?;
+        append_on_connection(
+            &tx,
+            LogRequest {
+                agent_id: binding.agent_id.clone(),
+                method: binding.method.clone(),
+                intent_category: "ServerExecutionCompleted".to_string(),
+                authorized: true,
+                reasoning: "durable server execution result and receipt committed".to_string(),
+                policy_decision: Some(receipt),
+                correlation_id: Some(binding.correlation_id.clone()),
+            },
+        )?;
+        tx.commit()?;
+        Ok(ServerExecutionCompleted {
+            execution_id: execution_id.to_string(),
+            status,
+            content_type,
+            body,
+            result_sha256,
+            receipt_json,
+        })
     }
 
     /// Walk every entry in seq order, recompute each hash, and confirm
@@ -646,6 +793,128 @@ pub struct GraduationStats {
     pub window_end: Option<DateTime<Utc>>,
 }
 
+fn append_on_connection(conn: &Connection, req: LogRequest) -> rusqlite::Result<LedgerEntry> {
+    let (next_seq, prev_hash): (i64, String) = conn
+        .query_row(
+            "SELECT seq, entry_hash FROM entries ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| Ok((row.get::<_, i64>(0)? + 1, row.get::<_, String>(1)?)),
+        )
+        .unwrap_or((1, GENESIS_PREV_HASH.to_string()));
+    let mut entry = LedgerEntry {
+        id: Uuid::new_v4(),
+        timestamp: Utc::now(),
+        agent_id: req.agent_id,
+        method: req.method,
+        intent_category: req.intent_category,
+        authorized: req.authorized,
+        reasoning: req.reasoning,
+        policy_decision: req.policy_decision,
+        seq: next_seq,
+        prev_hash,
+        entry_hash: String::new(),
+        chain_version: CURRENT_CHAIN_VERSION,
+        correlation_id: req.correlation_id,
+    };
+    entry.entry_hash = recompute_for_version(entry.chain_version, &entry)
+        .expect("CURRENT_CHAIN_VERSION must be supported by this binary");
+    let policy_decision_json = entry
+        .policy_decision
+        .as_ref()
+        .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()));
+    conn.execute(
+        "INSERT INTO entries (id, seq, timestamp, agent_id, method, intent_category,
+                              authorized, reasoning, policy_decision, prev_hash, entry_hash,
+                              chain_version, correlation_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        rusqlite::params![
+            entry.id.to_string(),
+            entry.seq,
+            entry.timestamp.to_rfc3339(),
+            entry.agent_id,
+            entry.method,
+            entry.intent_category,
+            entry.authorized as i64,
+            entry.reasoning,
+            policy_decision_json,
+            entry.prev_hash,
+            entry.entry_hash,
+            entry.chain_version,
+            entry.correlation_id,
+        ],
+    )?;
+    Ok(entry)
+}
+
+fn inspect_server_execution(
+    conn: &Connection,
+    binding: &ServerExecutionBinding,
+) -> rusqlite::Result<ServerExecutionOutcome> {
+    let row = conn
+        .query_row(
+            "SELECT route, method, tool_name, submitted_request_sha256,
+                    effective_request_sha256, state, execution_id, response_status,
+                    response_content_type, response_body, result_sha256, receipt_json
+             FROM server_executions WHERE agent_id = ?1 AND idempotency_id = ?2",
+            rusqlite::params![binding.agent_id, binding.idempotency_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<Vec<u8>>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        route,
+        method,
+        tool_name,
+        submitted_digest,
+        _effective_digest,
+        state,
+        execution_id,
+        response_status,
+        content_type,
+        body,
+        result_sha256,
+        receipt_json,
+    )) = row
+    else {
+        return Ok(ServerExecutionOutcome::Missing);
+    };
+    if route != binding.route
+        || method != binding.method
+        || tool_name != binding.tool_name
+        || submitted_digest != binding.submitted_request_sha256
+    {
+        return Ok(ServerExecutionOutcome::Conflict);
+    }
+    if state != "completed" {
+        return Ok(ServerExecutionOutcome::Uncertain);
+    }
+    let completed = ServerExecutionCompleted {
+        execution_id,
+        status: response_status
+            .and_then(|status| u16::try_from(status).ok())
+            .ok_or(rusqlite::Error::InvalidQuery)?,
+        content_type,
+        body: body.ok_or(rusqlite::Error::InvalidQuery)?,
+        result_sha256: result_sha256.ok_or(rusqlite::Error::InvalidQuery)?,
+        receipt_json: receipt_json.ok_or(rusqlite::Error::InvalidQuery)?,
+    };
+    Ok(ServerExecutionOutcome::Completed(completed))
+}
+
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS entries (
@@ -678,7 +947,34 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             decider_note TEXT,
             callback_url TEXT
          );
-         CREATE INDEX IF NOT EXISTS idx_pendings_decided_at ON pendings(decided_at);",
+         CREATE INDEX IF NOT EXISTS idx_pendings_decided_at ON pendings(decided_at);
+         CREATE TABLE IF NOT EXISTS server_executions (
+            agent_id TEXT NOT NULL,
+            idempotency_id TEXT NOT NULL,
+            execution_id TEXT NOT NULL UNIQUE,
+            correlation_id TEXT NOT NULL,
+            route TEXT NOT NULL,
+            method TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            submitted_request_sha256 TEXT NOT NULL,
+            effective_request_sha256 TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('in_flight', 'completed')),
+            response_status INTEGER,
+            response_content_type TEXT,
+            response_body BLOB,
+            result_sha256 TEXT,
+            receipt_json TEXT,
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            PRIMARY KEY (agent_id, idempotency_id)
+         );
+         CREATE TABLE IF NOT EXISTS server_execution_outbox (
+            event_id TEXT PRIMARY KEY,
+            execution_id TEXT NOT NULL UNIQUE,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            delivered_at TEXT
+         );",
     )?;
 
     // Idempotent migrations for legacy DBs. Each ALTER adds one
@@ -1165,5 +1461,62 @@ mod tests {
         let past = Utc::now() - chrono::Duration::days(1);
         let s = ledger.graduation_stats(Some(past)).await.unwrap();
         assert_eq!(s.total, 1);
+    }
+
+    fn server_binding() -> ServerExecutionBinding {
+        ServerExecutionBinding {
+            agent_id: "agent-a".to_string(),
+            idempotency_id: Uuid::parse_str("7a7adf0c-0ef7-45aa-a801-598e38095dfa").unwrap(),
+            correlation_id: "7a7adf0c-0ef7-45aa-a801-598e38095dfa".to_string(),
+            route: "/mcp".to_string(),
+            method: "tools/call".to_string(),
+            tool_name: "transfer".to_string(),
+            submitted_request_sha256: "sha256:request".to_string(),
+            effective_request_sha256: "sha256:request".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_server_execution_replays_without_a_second_start() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        let binding = server_binding();
+        assert!(matches!(
+            ledger.begin_server_execution(&binding).await.unwrap(),
+            ServerExecutionOutcome::Started
+        ));
+        assert!(matches!(
+            ledger.begin_server_execution(&binding).await.unwrap(),
+            ServerExecutionOutcome::Uncertain
+        ));
+        ledger
+            .complete_server_execution(
+                &binding,
+                200,
+                Some("application/json".to_string()),
+                br#"{"ok":true}"#.to_vec(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            ledger.inspect_server_execution(&binding).await.unwrap(),
+            ServerExecutionOutcome::Completed(_)
+        ));
+        assert!(ledger.verify().await.unwrap().valid);
+    }
+
+    #[tokio::test]
+    async fn durable_server_execution_conflicts_on_payload_substitution() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        let binding = server_binding();
+        assert!(matches!(
+            ledger.begin_server_execution(&binding).await.unwrap(),
+            ServerExecutionOutcome::Started
+        ));
+        let mut substituted = binding;
+        substituted.submitted_request_sha256 = "sha256:different".to_string();
+        assert!(matches!(
+            ledger.inspect_server_execution(&substituted).await.unwrap(),
+            ServerExecutionOutcome::Conflict
+        ));
     }
 }

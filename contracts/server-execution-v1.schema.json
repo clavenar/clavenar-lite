@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://specs.clavenar.com/contracts/server-execution-v1.schema.json",
+  "title": "Clavenar durable server execution receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "stage",
+    "execution_id",
+    "idempotency_id",
+    "caller",
+    "route",
+    "method",
+    "tool_name",
+    "submitted_request_sha256",
+    "effective_request_sha256",
+    "response_status",
+    "result_sha256",
+    "result",
+    "outbox_event_id"
+  ],
+  "properties": {
+    "contract": {
+      "const": "clavenar.server-execution/v1"
+    },
+    "stage": {
+      "const": "execution.completed"
+    },
+    "execution_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "idempotency_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "caller": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "route": {
+      "const": "/mcp"
+    },
+    "method": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "tool_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "submitted_request_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "effective_request_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "response_status": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 599
+    },
+    "result_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "result": {},
+    "outbox_event_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

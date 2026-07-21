@@ -1,0 +1,63 @@
+{
+  "contract": "clavenar.server-execution/v1",
+  "selector": {
+    "x-clavenar-server-execution-contract": "clavenar.server-execution/v1",
+    "x-clavenar-idempotency-id": "7a7adf0c-0ef7-45aa-a801-598e38095dfa"
+  },
+  "intent": {
+    "stage": "execution.intent",
+    "execution_id": "3210be8b-91d4-53c0-977b-d110b43f05dc",
+    "caller": "spiffe://clavenar.local/tenant/acme/agent/payments/instance/primary",
+    "route": "/mcp",
+    "method": "tools/call",
+    "tool_name": "transfer",
+    "submitted_request_sha256": "sha256:a7ab70ad94ef4a10f71b2a5d28acdcfa0c9cf8470c97c03bca35e87d652b5f10",
+    "effective_request_sha256": "sha256:a7ab70ad94ef4a10f71b2a5d28acdcfa0c9cf8470c97c03bca35e87d652b5f10",
+    "state": "in_flight"
+  },
+  "completion": {
+    "contract": "clavenar.server-execution/v1",
+    "stage": "execution.completed",
+    "execution_id": "3210be8b-91d4-53c0-977b-d110b43f05dc",
+    "idempotency_id": "7a7adf0c-0ef7-45aa-a801-598e38095dfa",
+    "caller": "spiffe://clavenar.local/tenant/acme/agent/payments/instance/primary",
+    "route": "/mcp",
+    "method": "tools/call",
+    "tool_name": "transfer",
+    "submitted_request_sha256": "sha256:a7ab70ad94ef4a10f71b2a5d28acdcfa0c9cf8470c97c03bca35e87d652b5f10",
+    "effective_request_sha256": "sha256:a7ab70ad94ef4a10f71b2a5d28acdcfa0c9cf8470c97c03bca35e87d652b5f10",
+    "response_status": 200,
+    "result_sha256": "sha256:79ab61ef5310c96c99c40b83f94b5a912c7e74038bcdbb13903df19fb4f6e753",
+    "result": {
+      "id": "7a7adf0c-0ef7-45aa-a801-598e38095dfa",
+      "jsonrpc": "2.0",
+      "result": {
+        "effect_id": "effect-001",
+        "ok": true
+      }
+    },
+    "outbox_event_id": "f344780a-34b8-5847-b163-1fc4ec1ad564"
+  },
+  "outcomes": {
+    "exact_completed_retry": {
+      "status": 200,
+      "replayed": true,
+      "upstream_effects": 0
+    },
+    "substitution": {
+      "status": 409,
+      "error": "server_execution_idempotency_conflict",
+      "upstream_effects": 0
+    },
+    "interrupted_retry": {
+      "status": 409,
+      "error": "server_execution_uncertain",
+      "upstream_effects": 0
+    },
+    "storage_unavailable": {
+      "status": 503,
+      "error": "server_execution_storage_unavailable",
+      "upstream_effects": 0
+    }
+  }
+}

@@ -154,6 +154,71 @@ async fn decision_selectors_fail_before_any_server_execution_effect() {
     assert_eq!(effects.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn durable_server_execution_replays_actual_result_and_conflicts_substitution() {
+    let (upstream, effects) = spawn_counting_upstream().await;
+    let (lite, ledger) = spawn_lite(
+        format!("http://{upstream}/mcp"),
+        Some("agent-token".to_string()),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let idempotency_id = "7a7adf0c-0ef7-45aa-a801-598e38095dfa";
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": idempotency_id,
+        "method": "call_tool",
+        "params": {"name": "ping", "arguments": {"value": 1}}
+    });
+    let send = |body: serde_json::Value| {
+        client
+            .post(format!("http://{lite}/mcp"))
+            .bearer_auth("agent-token")
+            .header(
+                "x-clavenar-server-execution-contract",
+                "clavenar.server-execution/v1",
+            )
+            .header("x-clavenar-idempotency-id", idempotency_id)
+            .json(&body)
+            .send()
+    };
+
+    let first = send(body.clone()).await.unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        first
+            .headers()
+            .get("x-clavenar-server-execution-replayed")
+            .unwrap(),
+        "false"
+    );
+    let first_body = first.bytes().await.unwrap();
+
+    let replay = send(body.clone()).await.unwrap();
+    assert_eq!(replay.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        replay
+            .headers()
+            .get("x-clavenar-server-execution-replayed")
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(replay.bytes().await.unwrap(), first_body);
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+
+    let mut substituted = body;
+    substituted["params"]["arguments"]["value"] = serde_json::json!(2);
+    let conflict = send(substituted).await.unwrap();
+    assert_eq!(conflict.status(), reqwest::StatusCode::CONFLICT);
+    let conflict_body: serde_json::Value = conflict.json().await.unwrap();
+    assert_eq!(
+        conflict_body["error"],
+        "server_execution_idempotency_conflict"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    assert!(ledger.verify().await.unwrap().valid);
+}
+
 async fn spawn_lite_with_mode(
     upstream_url: String,
     bearer_token: Option<String>,

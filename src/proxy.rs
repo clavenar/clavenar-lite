@@ -46,6 +46,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -53,6 +54,7 @@ use uuid::Uuid;
 use crate::heuristics::{self, HeuristicVerdict};
 use crate::ledger::{
     DecideError, Ledger, LogRequest, ParkRequest, Pending, PendingFilter, PendingSort,
+    ServerExecutionBinding, ServerExecutionCompleted, ServerExecutionOutcome,
 };
 use crate::policy::{AgentHistory, PolicyDecision, PolicyEngine, PolicyInput};
 use crate::rate_limit::{RateLimitOutcome, RateLimiter};
@@ -62,7 +64,104 @@ const CORRELATION_HEADER: &str = "X-Clavenar-Correlation-Id";
 const DECISION_CONTRACT_HEADER: &str = "x-clavenar-decision-contract";
 const LEGACY_EXECUTION_CONTRACT_HEADER: &str = "x-clavenar-execution-contract";
 const IDEMPOTENCY_ID_HEADER: &str = "x-clavenar-idempotency-id";
+const SERVER_EXECUTION_CONTRACT_HEADER: &str = "x-clavenar-server-execution-contract";
+const SERVER_EXECUTION_CONTRACT: &str = "clavenar.server-execution/v1";
 const PENDING_AUTHORIZATION_CONTRACT: &str = "clavenar.pending-authorization/v1";
+
+#[derive(Clone, Copy, Debug)]
+struct ServerExecutionRequest {
+    idempotency_id: Uuid,
+}
+
+fn parse_server_execution_request(
+    headers: &HeaderMap,
+) -> Result<Option<ServerExecutionRequest>, &'static str> {
+    let selector = headers.get(SERVER_EXECUTION_CONTRACT_HEADER);
+    if selector.is_none() {
+        return Ok(None);
+    }
+    if headers.contains_key(DECISION_CONTRACT_HEADER)
+        || headers.contains_key(LEGACY_EXECUTION_CONTRACT_HEADER)
+    {
+        return Err("server_execution_selector_conflict");
+    }
+    let valid_selector = selector
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == SERVER_EXECUTION_CONTRACT);
+    let raw_id = headers
+        .get(IDEMPOTENCY_ID_HEADER)
+        .and_then(|value| value.to_str().ok());
+    let idempotency_id = raw_id.and_then(|value| Uuid::parse_str(value).ok());
+    let canonical_id = raw_id
+        .zip(idempotency_id)
+        .is_some_and(|(raw, id)| id.to_string() == raw);
+    if !valid_selector || !canonical_id {
+        return Err("server_execution_selector_invalid");
+    }
+    Ok(Some(ServerExecutionRequest {
+        idempotency_id: idempotency_id.expect("validated above"),
+    }))
+}
+
+fn server_execution_error(
+    status: StatusCode,
+    error: &'static str,
+    correlation_id: &str,
+    mode: ClavenarMode,
+) -> Response {
+    (
+        status,
+        clavenar_headers(correlation_id, mode, false, false),
+        Json(serde_json::json!({
+            "contract": SERVER_EXECUTION_CONTRACT,
+            "error": error,
+            "correlation_id": correlation_id,
+            "executable": false,
+        })),
+    )
+        .into_response()
+}
+
+fn server_execution_response(
+    completed: ServerExecutionCompleted,
+    correlation_id: &str,
+    mode: ClavenarMode,
+    replayed: bool,
+) -> Response {
+    let status = StatusCode::from_u16(completed.status).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+    let mut headers = clavenar_headers(correlation_id, mode, false, false);
+    headers.insert(
+        "x-clavenar-execution-id",
+        completed
+            .execution_id
+            .parse()
+            .expect("execution UUID is ASCII"),
+    );
+    headers.insert(
+        "x-clavenar-result-sha256",
+        completed.result_sha256.parse().expect("digest is ASCII"),
+    );
+    headers.insert(
+        "x-clavenar-server-execution-replayed",
+        if replayed { "true" } else { "false" }
+            .parse()
+            .expect("boolean is ASCII"),
+    );
+    let receipt_sha256 = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(completed.receipt_json.as_bytes()))
+    );
+    headers.insert(
+        "x-clavenar-server-execution-receipt-sha256",
+        receipt_sha256.parse().expect("digest is ASCII"),
+    );
+    if let Some(content_type) = completed.content_type
+        && let Ok(value) = content_type.parse()
+    {
+        headers.insert(axum::http::header::CONTENT_TYPE, value);
+    }
+    (status, headers, completed.body).into_response()
+}
 
 /// Stamp the standard clavenar response headers on a response.
 /// `correlation_id` is included unconditionally — even auth-fail and
@@ -990,7 +1089,21 @@ async fn handle_mcp(
     // — including 401s — carries a trace id. Partners filter the
     // ledger by this id from the X-Clavenar-Correlation-Id header on
     // the throw they catch SDK-side.
-    let correlation_id = Uuid::new_v4().to_string();
+    let fallback_correlation_id = Uuid::new_v4().to_string();
+    let server_execution = match parse_server_execution_request(&headers) {
+        Ok(selected) => selected,
+        Err(error) => {
+            return server_execution_error(
+                StatusCode::BAD_REQUEST,
+                error,
+                &fallback_correlation_id,
+                state.mode,
+            );
+        }
+    };
+    let correlation_id = server_execution
+        .map(|request| request.idempotency_id.to_string())
+        .unwrap_or(fallback_correlation_id);
 
     // Bearer auth (if configured). `Authorization: Bearer <token>` —
     // any other shape is 401. Compared in constant time so the
@@ -1019,6 +1132,15 @@ async fn handle_mcp(
         None => "anonymous".to_string(),
     };
 
+    if server_execution.is_some() && state.agents.is_none() {
+        return server_execution_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_execution_identity_required",
+            &correlation_id,
+            state.mode,
+        );
+    }
+
     // Lite's `/mcp` route is explicitly server-executed. A governed SDK
     // decision selector must never be ignored here, because doing so would
     // turn a zero-effect authorization request into an upstream effect. Lite
@@ -1026,9 +1148,10 @@ async fn handle_mcp(
     // pending contract; until then every complete, partial, unknown, or legacy
     // selector fails before rate limiting, policy work, ledger mutation, or
     // upstream access.
-    if headers.contains_key(DECISION_CONTRACT_HEADER)
-        || headers.contains_key(LEGACY_EXECUTION_CONTRACT_HEADER)
-        || headers.contains_key(IDEMPOTENCY_ID_HEADER)
+    if server_execution.is_none()
+        && (headers.contains_key(DECISION_CONTRACT_HEADER)
+            || headers.contains_key(LEGACY_EXECUTION_CONTRACT_HEADER)
+            || headers.contains_key(IDEMPOTENCY_ID_HEADER))
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1132,6 +1255,15 @@ async fn handle_mcp(
             .into_response();
     }
 
+    if server_execution.is_some() && is_mcp_control_method(&parsed.method) {
+        return server_execution_error(
+            StatusCode::BAD_REQUEST,
+            "server_execution_tool_required",
+            &correlation_id,
+            state.mode,
+        );
+    }
+
     // MCP control-plane methods (handshake + catalog) carry no tool
     // arguments to inspect — `initialize` negotiates capabilities,
     // `tools/list` returns the catalog, `ping`/`notifications/*` are
@@ -1154,6 +1286,59 @@ async fn handle_mcp(
         .and_then(|v| v.as_str())
         .unwrap_or(parsed.method.as_str())
         .to_string();
+
+    let server_binding = server_execution.map(|request| {
+        let canonical_request = serde_json::from_slice::<serde_json::Value>(&body)
+            .expect("McpRequest was already parsed")
+            .to_string();
+        let request_sha256 = format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(canonical_request.as_bytes()))
+        );
+        ServerExecutionBinding {
+            agent_id: agent_id.clone(),
+            idempotency_id: request.idempotency_id,
+            correlation_id: correlation_id.clone(),
+            route: "/mcp".to_string(),
+            method: parsed.method.clone(),
+            tool_name: tool_type.clone(),
+            submitted_request_sha256: request_sha256.clone(),
+            effective_request_sha256: request_sha256,
+        }
+    });
+    if let Some(binding) = server_binding.as_ref() {
+        match state.ledger.inspect_server_execution(binding).await {
+            Ok(ServerExecutionOutcome::Missing) => {}
+            Ok(ServerExecutionOutcome::Completed(completed)) => {
+                return server_execution_response(completed, &correlation_id, state.mode, true);
+            }
+            Ok(ServerExecutionOutcome::Uncertain | ServerExecutionOutcome::Started) => {
+                return server_execution_error(
+                    StatusCode::CONFLICT,
+                    "server_execution_uncertain",
+                    &correlation_id,
+                    state.mode,
+                );
+            }
+            Ok(ServerExecutionOutcome::Conflict) => {
+                return server_execution_error(
+                    StatusCode::CONFLICT,
+                    "server_execution_idempotency_conflict",
+                    &correlation_id,
+                    state.mode,
+                );
+            }
+            Err(error) => {
+                tracing::error!("server execution inspect failed: {error}");
+                return server_execution_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_execution_storage_unavailable",
+                    &correlation_id,
+                    state.mode,
+                );
+            }
+        }
+    }
 
     let body_str = String::from_utf8_lossy(&body);
 
@@ -1209,77 +1394,122 @@ async fn handle_mcp(
 
     // -------- Yellow tier: park + 202 (enforce) or forward + flag (observe) --------
     if would_pend && state.mode == ClavenarMode::Enforce {
-        // Park the request for human review. The operator (Tue's
-        // decide endpoint) flips this row; SDK polls (Wed's GET
-        // endpoint) to learn the outcome.
-        let park = ParkRequest {
-            correlation_id: correlation_id.clone(),
-            agent_id: agent_id.clone(),
-            tool_type: tool_type.clone(),
-            method: parsed.method.clone(),
-            review_reasons: policy.review_reasons.clone(),
-            callback_url: callback_url.clone(),
-        };
-        let parked = match state.ledger.park_pending(park).await {
-            Ok(p) => p,
-            Err(e) => {
-                // Park failed (most likely a duplicate correlation_id —
-                // shouldn't happen with Uuid::new_v4 but be defensive).
-                // Surface it as a 500 rather than silently 202'ing
-                // without backing state.
-                tracing::error!("park_pending failed: {}", e);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    clavenar_headers(&correlation_id, state.mode, false, false),
-                    "failed to park pending request",
-                )
-                    .into_response();
+        let mut approved_resume = false;
+        if server_execution.is_some() {
+            match state.ledger.get_pending(&correlation_id).await {
+                Ok(Some(pending)) if pending.decision.as_deref() == Some("allow") => {
+                    approved_resume = true;
+                }
+                Ok(Some(pending)) if pending.decision.as_deref() == Some("deny") => {
+                    return server_execution_error(
+                        StatusCode::FORBIDDEN,
+                        "server_execution_pending_denied",
+                        &correlation_id,
+                        state.mode,
+                    );
+                }
+                Ok(Some(pending)) => {
+                    return (
+                        StatusCode::ACCEPTED,
+                        clavenar_headers(&correlation_id, state.mode, false, false),
+                        Json(PendingResponse {
+                            contract: PENDING_AUTHORIZATION_CONTRACT,
+                            status: "pending",
+                            pending_id: correlation_id.clone(),
+                            correlation_id: correlation_id.clone(),
+                            review_reasons: pending.review_reasons,
+                            detail: state
+                                .verbose_verdicts
+                                .then(|| VerdictBreakdown::from_verdict(&brain)),
+                        }),
+                    )
+                        .into_response();
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!("server execution pending lookup failed: {error}");
+                    return server_execution_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "server_execution_storage_unavailable",
+                        &correlation_id,
+                        state.mode,
+                    );
+                }
             }
-        };
-
-        // Fire-and-forget Slack alert if configured. The agent's 202
-        // never waits on Slack — a flaky webhook would otherwise
-        // bottleneck every parked tool call.
-        if let Some(url) = &state.slack_webhook_url {
-            let http = state.http.clone();
-            let url = url.clone();
-            tokio::spawn(async move {
-                crate::slack::notify_pending_parked(&http, &url, &parked).await;
-            });
         }
+        if !approved_resume {
+            // Park the request for human review. The operator (Tue's
+            // decide endpoint) flips this row; SDK polls (Wed's GET
+            // endpoint) to learn the outcome.
+            let park = ParkRequest {
+                correlation_id: correlation_id.clone(),
+                agent_id: agent_id.clone(),
+                tool_type: tool_type.clone(),
+                method: parsed.method.clone(),
+                review_reasons: policy.review_reasons.clone(),
+                callback_url: callback_url.clone(),
+            };
+            let parked = match state.ledger.park_pending(park).await {
+                Ok(p) => p,
+                Err(e) => {
+                    // Park failed (most likely a duplicate correlation_id —
+                    // shouldn't happen with Uuid::new_v4 but be defensive).
+                    // Surface it as a 500 rather than silently 202'ing
+                    // without backing state.
+                    tracing::error!("park_pending failed: {}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        clavenar_headers(&correlation_id, state.mode, false, false),
+                        "failed to park pending request",
+                    )
+                        .into_response();
+                }
+            };
 
-        maybe_fire_webhook(
-            &state,
-            WebhookEvent {
-                event: webhook::EVENT_PARK,
-                correlation_id: &correlation_id,
-                agent_id: &agent_id,
-                tool_type: &tool_type,
-                method: &parsed.method,
-                intent_category: "PendingReview",
-                reasoning: &combined_reasoning,
-                review_reasons: &policy.review_reasons,
-                mode: state.mode.as_str(),
-                ts: webhook::now_rfc3339(),
-            },
-        );
+            // Fire-and-forget Slack alert if configured. The agent's 202
+            // never waits on Slack — a flaky webhook would otherwise
+            // bottleneck every parked tool call.
+            if let Some(url) = &state.slack_webhook_url {
+                let http = state.http.clone();
+                let url = url.clone();
+                tokio::spawn(async move {
+                    crate::slack::notify_pending_parked(&http, &url, &parked).await;
+                });
+            }
 
-        let resp = PendingResponse {
-            contract: PENDING_AUTHORIZATION_CONTRACT,
-            status: "pending",
-            pending_id: correlation_id.clone(),
-            correlation_id: correlation_id.clone(),
-            review_reasons: policy.review_reasons.clone(),
-            detail: state
-                .verbose_verdicts
-                .then(|| VerdictBreakdown::from_verdict(&brain)),
-        };
-        return (
-            StatusCode::ACCEPTED,
-            clavenar_headers(&correlation_id, state.mode, false, false),
-            Json(resp),
-        )
-            .into_response();
+            maybe_fire_webhook(
+                &state,
+                WebhookEvent {
+                    event: webhook::EVENT_PARK,
+                    correlation_id: &correlation_id,
+                    agent_id: &agent_id,
+                    tool_type: &tool_type,
+                    method: &parsed.method,
+                    intent_category: "PendingReview",
+                    reasoning: &combined_reasoning,
+                    review_reasons: &policy.review_reasons,
+                    mode: state.mode.as_str(),
+                    ts: webhook::now_rfc3339(),
+                },
+            );
+
+            let resp = PendingResponse {
+                contract: PENDING_AUTHORIZATION_CONTRACT,
+                status: "pending",
+                pending_id: correlation_id.clone(),
+                correlation_id: correlation_id.clone(),
+                review_reasons: policy.review_reasons.clone(),
+                detail: state
+                    .verbose_verdicts
+                    .then(|| VerdictBreakdown::from_verdict(&brain)),
+            };
+            return (
+                StatusCode::ACCEPTED,
+                clavenar_headers(&correlation_id, state.mode, false, false),
+                Json(resp),
+            )
+                .into_response();
+        }
     }
 
     if would_deny && state.mode == ClavenarMode::Enforce {
@@ -1328,6 +1558,47 @@ async fn handle_mcp(
     // below tell them what enforce mode would have done.
 
     // -------- Forward upstream --------
+    if let Some(binding) = server_binding.as_ref() {
+        match state.ledger.begin_server_execution(binding).await {
+            Ok(ServerExecutionOutcome::Started) => {}
+            Ok(ServerExecutionOutcome::Completed(completed)) => {
+                return server_execution_response(completed, &correlation_id, state.mode, true);
+            }
+            Ok(ServerExecutionOutcome::Uncertain) => {
+                return server_execution_error(
+                    StatusCode::CONFLICT,
+                    "server_execution_uncertain",
+                    &correlation_id,
+                    state.mode,
+                );
+            }
+            Ok(ServerExecutionOutcome::Conflict) => {
+                return server_execution_error(
+                    StatusCode::CONFLICT,
+                    "server_execution_idempotency_conflict",
+                    &correlation_id,
+                    state.mode,
+                );
+            }
+            Ok(ServerExecutionOutcome::Missing) => {
+                return server_execution_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_execution_storage_unavailable",
+                    &correlation_id,
+                    state.mode,
+                );
+            }
+            Err(error) => {
+                tracing::error!("server execution intent commit failed: {error}");
+                return server_execution_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_execution_storage_unavailable",
+                    &correlation_id,
+                    state.mode,
+                );
+            }
+        }
+    }
     let mut req_builder = state
         .http
         .post(&state.upstream_url)
@@ -1340,6 +1611,15 @@ async fn handle_mcp(
     let upstream = match req_builder.send().await {
         Ok(r) => r,
         Err(e) => {
+            if server_binding.is_some() {
+                tracing::error!("durable server execution upstream outcome uncertain: {e}");
+                return server_execution_error(
+                    StatusCode::CONFLICT,
+                    "server_execution_uncertain",
+                    &correlation_id,
+                    state.mode,
+                );
+            }
             return (
                 StatusCode::BAD_GATEWAY,
                 clavenar_headers(&correlation_id, state.mode, would_deny, would_pend),
@@ -1350,9 +1630,23 @@ async fn handle_mcp(
     };
 
     let status = upstream.status();
+    let upstream_content_type = upstream
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let upstream_body = match upstream.bytes().await {
         Ok(b) => b,
         Err(e) => {
+            if server_binding.is_some() {
+                tracing::error!("durable server execution response outcome uncertain: {e}");
+                return server_execution_error(
+                    StatusCode::CONFLICT,
+                    "server_execution_uncertain",
+                    &correlation_id,
+                    state.mode,
+                );
+            }
             return (
                 StatusCode::BAD_GATEWAY,
                 clavenar_headers(&correlation_id, state.mode, would_deny, would_pend),
@@ -1360,6 +1654,32 @@ async fn handle_mcp(
             )
                 .into_response();
         }
+    };
+
+    let durable_completion = if let Some(binding) = server_binding.as_ref() {
+        match state
+            .ledger
+            .complete_server_execution(
+                binding,
+                status.as_u16(),
+                upstream_content_type,
+                upstream_body.to_vec(),
+            )
+            .await
+        {
+            Ok(completed) => Some(completed),
+            Err(error) => {
+                tracing::error!("server execution completion commit failed: {error}");
+                return server_execution_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "server_execution_completion_uncertain",
+                    &correlation_id,
+                    state.mode,
+                );
+            }
+        }
+    } else {
+        None
     };
 
     // Pass the upstream status + body through. Convert to axum's
@@ -1392,6 +1712,9 @@ async fn handle_mcp(
             ts: webhook::now_rfc3339(),
         },
     );
+    if let Some(completed) = durable_completion {
+        return server_execution_response(completed, &correlation_id, state.mode, false);
+    }
     (
         out_status,
         clavenar_headers(&correlation_id, state.mode, would_deny, would_pend),
@@ -1516,6 +1839,35 @@ mod tests {
         let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         p.push("policies");
         p
+    }
+
+    #[test]
+    fn packaged_server_execution_fixture_has_the_public_contract() {
+        let fixture: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../contracts/server-execution-v1.fixture.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["contract"], SERVER_EXECUTION_CONTRACT);
+        assert_eq!(fixture["intent"]["stage"], "execution.intent");
+        assert_eq!(fixture["completion"]["stage"], "execution.completed");
+    }
+
+    #[test]
+    fn server_execution_selector_is_paired_canonical_and_exclusive() {
+        let id = "7a7adf0c-0ef7-45aa-a801-598e38095dfa";
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            SERVER_EXECUTION_CONTRACT_HEADER,
+            SERVER_EXECUTION_CONTRACT.parse().unwrap(),
+        );
+        headers.insert(IDEMPOTENCY_ID_HEADER, id.parse().unwrap());
+        let selected = parse_server_execution_request(&headers).unwrap().unwrap();
+        assert_eq!(selected.idempotency_id.to_string(), id);
+        headers.insert(
+            DECISION_CONTRACT_HEADER,
+            "clavenar.decision/v1".parse().unwrap(),
+        );
+        assert!(parse_server_execution_request(&headers).is_err());
     }
 
     #[tokio::test]
