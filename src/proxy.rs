@@ -66,11 +66,51 @@ const LEGACY_EXECUTION_CONTRACT_HEADER: &str = "x-clavenar-execution-contract";
 const IDEMPOTENCY_ID_HEADER: &str = "x-clavenar-idempotency-id";
 const SERVER_EXECUTION_CONTRACT_HEADER: &str = "x-clavenar-server-execution-contract";
 const SERVER_EXECUTION_CONTRACT: &str = "clavenar.server-execution/v1";
+const DECISION_CONTRACT: &str = "clavenar.decision/v1";
 const PENDING_AUTHORIZATION_CONTRACT: &str = "clavenar.pending-authorization/v1";
 
 #[derive(Clone, Copy, Debug)]
 struct ServerExecutionRequest {
     idempotency_id: Uuid,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DecisionRequest {
+    idempotency_id: Uuid,
+}
+
+fn parse_decision_request(headers: &HeaderMap) -> Result<Option<DecisionRequest>, &'static str> {
+    let selector = headers.get(DECISION_CONTRACT_HEADER);
+    if selector.is_none() {
+        if headers.contains_key(LEGACY_EXECUTION_CONTRACT_HEADER)
+            || (headers.contains_key(IDEMPOTENCY_ID_HEADER)
+                && !headers.contains_key(SERVER_EXECUTION_CONTRACT_HEADER))
+        {
+            return Err("decision_selector_invalid");
+        }
+        return Ok(None);
+    }
+    if headers.contains_key(SERVER_EXECUTION_CONTRACT_HEADER)
+        || headers.contains_key(LEGACY_EXECUTION_CONTRACT_HEADER)
+    {
+        return Err("decision_selector_conflict");
+    }
+    let valid_selector = selector
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == DECISION_CONTRACT);
+    let raw_id = headers
+        .get(IDEMPOTENCY_ID_HEADER)
+        .and_then(|value| value.to_str().ok());
+    let idempotency_id = raw_id.and_then(|value| Uuid::parse_str(value).ok());
+    let canonical_id = raw_id
+        .zip(idempotency_id)
+        .is_some_and(|(raw, id)| id.to_string() == raw);
+    if !valid_selector || !canonical_id {
+        return Err("decision_selector_invalid");
+    }
+    Ok(Some(DecisionRequest {
+        idempotency_id: idempotency_id.expect("validated above"),
+    }))
 }
 
 fn parse_server_execution_request(
@@ -114,6 +154,20 @@ fn server_execution_error(
         clavenar_headers(correlation_id, mode, false, false),
         Json(serde_json::json!({
             "contract": SERVER_EXECUTION_CONTRACT,
+            "error": error,
+            "correlation_id": correlation_id,
+            "executable": false,
+        })),
+    )
+        .into_response()
+}
+
+fn decision_error(error: &'static str, correlation_id: &str, mode: ClavenarMode) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        clavenar_headers(correlation_id, mode, false, false),
+        Json(serde_json::json!({
+            "contract": DECISION_CONTRACT,
             "error": error,
             "correlation_id": correlation_id,
             "executable": false,
@@ -1101,8 +1155,15 @@ async fn handle_mcp(
             );
         }
     };
+    let decision = match parse_decision_request(&headers) {
+        Ok(selected) => selected,
+        Err(error) => {
+            return decision_error(error, &fallback_correlation_id, state.mode);
+        }
+    };
     let correlation_id = server_execution
         .map(|request| request.idempotency_id.to_string())
+        .or_else(|| decision.map(|request| request.idempotency_id.to_string()))
         .unwrap_or(fallback_correlation_id);
 
     // Bearer auth (if configured). `Authorization: Bearer <token>` —
@@ -1139,31 +1200,6 @@ async fn handle_mcp(
             &correlation_id,
             state.mode,
         );
-    }
-
-    // Lite's `/mcp` route is explicitly server-executed. A governed SDK
-    // decision selector must never be ignored here, because doing so would
-    // turn a zero-effect authorization request into an upstream effect. Lite
-    // gains the shared decision/receipt path only with the later durable
-    // pending contract; until then every complete, partial, unknown, or legacy
-    // selector fails before rate limiting, policy work, ledger mutation, or
-    // upstream access.
-    if server_execution.is_none()
-        && (headers.contains_key(DECISION_CONTRACT_HEADER)
-            || headers.contains_key(LEGACY_EXECUTION_CONTRACT_HEADER)
-            || headers.contains_key(IDEMPOTENCY_ID_HEADER))
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            clavenar_headers(&correlation_id, state.mode, false, false),
-            Json(serde_json::json!({
-                "error": "side_effect_free_decision_unsupported",
-                "decision_contract": "clavenar.decision/v1",
-                "server_execution_route": "/mcp",
-                "correlation_id": correlation_id,
-            })),
-        )
-            .into_response();
     }
 
     // Rate-limit gate. Runs after agent_id is known so the denial
@@ -1262,6 +1298,9 @@ async fn handle_mcp(
             &correlation_id,
             state.mode,
         );
+    }
+    if decision.is_some() && is_mcp_control_method(&parsed.method) {
+        return decision_error("decision_tool_required", &correlation_id, state.mode);
     }
 
     // MCP control-plane methods (handshake + catalog) carry no tool
@@ -1549,6 +1588,37 @@ async fn handle_mcp(
             StatusCode::FORBIDDEN,
             clavenar_headers(&correlation_id, state.mode, false, false),
             Json(resp),
+        )
+            .into_response();
+    }
+    if decision.is_some() {
+        // The public decision selector is a zero-effect path. It returns only
+        // authorization; the SDK remains the sole executor and owns the
+        // eventual actual result/receipt lifecycle.
+        maybe_fire_webhook(
+            &state,
+            WebhookEvent {
+                event: webhook::EVENT_ALLOW,
+                correlation_id: &correlation_id,
+                agent_id: &agent_id,
+                tool_type: &tool_type,
+                method: &parsed.method,
+                intent_category: &brain.intent_category,
+                reasoning: &combined_reasoning,
+                review_reasons: &policy.review_reasons,
+                mode: state.mode.as_str(),
+                ts: webhook::now_rfc3339(),
+            },
+        );
+        return (
+            StatusCode::OK,
+            clavenar_headers(&correlation_id, state.mode, false, false),
+            Json(serde_json::json!({
+                "contract": DECISION_CONTRACT,
+                "decision": "allow",
+                "correlation_id": correlation_id,
+                "executable": false,
+            })),
         )
             .into_response();
     }

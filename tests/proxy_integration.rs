@@ -90,7 +90,7 @@ async fn spawn_lite(
 }
 
 #[tokio::test]
-async fn decision_selectors_fail_before_any_server_execution_effect() {
+async fn decision_selector_is_side_effect_free_and_invalid_forms_fail_early() {
     let (upstream, effects) = spawn_counting_upstream().await;
     let (lite, ledger) = spawn_lite(format!("http://{upstream}/mcp"), None).await;
     let client = reqwest::Client::new();
@@ -98,17 +98,24 @@ async fn decision_selectors_fail_before_any_server_execution_effect() {
         "jsonrpc": "2.0",
         "id": "cfcc8767-4c73-41cc-8ece-b855863924c4",
         "method": "tools/call",
-        "params": {"name": "payments.transfer", "arguments": {"amount": 100}}
+        "params": {"name": "ping", "arguments": {"value": 1}}
     });
 
+    let decision = client
+        .post(format!("http://{lite}/mcp"))
+        .header("x-clavenar-decision-contract", "clavenar.decision/v1")
+        .header(
+            "x-clavenar-idempotency-id",
+            "cfcc8767-4c73-41cc-8ece-b855863924c4",
+        )
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(decision.status(), reqwest::StatusCode::OK);
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+
     for headers in [
-        vec![
-            ("x-clavenar-decision-contract", "clavenar.decision/v1"),
-            (
-                "x-clavenar-idempotency-id",
-                "cfcc8767-4c73-41cc-8ece-b855863924c4",
-            ),
-        ],
         vec![("x-clavenar-decision-contract", "clavenar.decision/v1")],
         vec![
             ("x-clavenar-decision-contract", "clavenar.decision/v999"),
@@ -132,16 +139,13 @@ async fn decision_selectors_fail_before_any_server_execution_effect() {
         let response = request.send().await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
         let error: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(error["error"], "side_effect_free_decision_unsupported");
+        assert_eq!(error["error"], "decision_selector_invalid");
     }
 
     assert_eq!(effects.load(Ordering::SeqCst), 0);
-    assert!(
-        ledger
-            .entries_for_agent("anonymous")
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        ledger.entries_for_agent("anonymous").await.unwrap().len(),
+        1
     );
 
     let response = client
