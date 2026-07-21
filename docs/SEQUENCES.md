@@ -196,7 +196,7 @@ sequenceDiagram
             HookJob->>SIEM: POST WebhookEvent JSON (5s timeout)
             SIEM-->>HookJob: 2xx (or warn)
         end
-        Proxy-->>Agent: 202 Accepted + PendingResponse { status:pending, correlation_id, review_reasons } + X-Clavenar-Correlation-Id
+        Proxy-->>Agent: 202 Accepted + clavenar.pending-authorization/v1 { status:pending, pending_id, correlation_id, review_reasons } + X-Clavenar-Correlation-Id
     else mode == Observe
         Note over Proxy: park branch skipped — falls through to forward
         Proxy->>Proxy: forward upstream as in Sec 2

@@ -62,6 +62,7 @@ const CORRELATION_HEADER: &str = "X-Clavenar-Correlation-Id";
 const DECISION_CONTRACT_HEADER: &str = "x-clavenar-decision-contract";
 const LEGACY_EXECUTION_CONTRACT_HEADER: &str = "x-clavenar-execution-contract";
 const IDEMPOTENCY_ID_HEADER: &str = "x-clavenar-idempotency-id";
+const PENDING_AUTHORIZATION_CONTRACT: &str = "clavenar.pending-authorization/v1";
 
 /// Stamp the standard clavenar response headers on a response.
 /// `correlation_id` is included unconditionally — even auth-fail and
@@ -320,7 +321,9 @@ struct DenyResponse {
 /// paths).
 #[derive(Debug, Serialize)]
 struct PendingResponse {
+    contract: &'static str,
     status: &'static str,
+    pending_id: String,
     correlation_id: String,
     review_reasons: Vec<String>,
     /// Per-detector breakdown — present ONLY under `--verbose-verdicts`.
@@ -457,6 +460,9 @@ struct DecideRequest {
 /// format is language-agnostic.
 #[derive(Debug, Serialize)]
 struct PendingView {
+    contract: &'static str,
+    status: &'static str,
+    pending_id: String,
     correlation_id: String,
     agent_id: String,
     tool_type: String,
@@ -470,7 +476,16 @@ struct PendingView {
 
 impl From<Pending> for PendingView {
     fn from(p: Pending) -> Self {
+        let status = match p.decision.as_deref() {
+            None => "pending",
+            Some("allow") => "approved",
+            Some("deny") => "denied",
+            Some(_) => "invalid",
+        };
         PendingView {
+            contract: PENDING_AUTHORIZATION_CONTRACT,
+            status,
+            pending_id: p.correlation_id.clone(),
             correlation_id: p.correlation_id,
             agent_id: p.agent_id,
             tool_type: p.tool_type,
@@ -1250,7 +1265,9 @@ async fn handle_mcp(
         );
 
         let resp = PendingResponse {
+            contract: PENDING_AUTHORIZATION_CONTRACT,
             status: "pending",
+            pending_id: correlation_id.clone(),
             correlation_id: correlation_id.clone(),
             review_reasons: policy.review_reasons.clone(),
             detail: state

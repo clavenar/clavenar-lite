@@ -385,7 +385,9 @@ Three outcomes are possible:
   section). Body shape:
   ```json
   {
+    "contract": "clavenar.pending-authorization/v1",
     "status": "pending",
+    "pending_id": "8f1d...",
     "correlation_id": "8f1d...",
     "review_reasons": ["Review: Wire transfers require human approval before execution."]
   }
@@ -404,12 +406,15 @@ When policy returns `allow: true` with `review` non-empty (the
 `wire_transfer` rule in the default `governance.rego` is the
 canonical example), clavenar-lite parks the request:
 
-1. **Park** — `POST /mcp` returns `202` with `{status, correlation_id,
-   review_reasons}`. The pendings table records the call; one ledger
+1. **Park** — `POST /mcp` returns `202` with `{contract, status,
+   pending_id, correlation_id, review_reasons}`. The pendings table records the call; one ledger
    row is written with `intent_category=PendingReview, authorized=false`.
 2. **Poll** — `GET /pending/{correlation_id}` returns the current state:
    ```json
    {
+     "contract": "clavenar.pending-authorization/v1",
+     "status": "pending",
+     "pending_id": "8f1d...",
      "correlation_id": "8f1d...",
      "agent_id": "bearer-agent",
      "tool_type": "wire_transfer",
@@ -421,6 +426,10 @@ canonical example), clavenar-lite parks the request:
      "decider_note": null
    }
    ```
+   After a decision, `status` becomes `"approved"` or `"denied"`.
+   Lite shares the versioned pending lifecycle shape and durable correlation
+   polling with the full edition, but remains a server-execution mode and does
+   not issue SDK-governed signed authorizations.
    The SDK polls this until `decision` flips from `null` to `"allow"`
    or `"deny"`. Auth: reuses the agent `--token` (same identity that
    issued the `/mcp` call).

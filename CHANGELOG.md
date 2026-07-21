@@ -6,6 +6,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Yellow-tier `202` responses and durable pending poll views now identify the
+  shared `clavenar.pending-authorization/v1` contract and expose stable
+  pending IDs plus explicit pending/approved/denied lifecycle status. Lite
+  retains server execution and does not issue SDK-governed authorizations.
+
 ### Security
 
 - `/mcp` now rejects complete, partial, unknown, and legacy governed-decision

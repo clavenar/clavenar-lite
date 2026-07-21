@@ -985,6 +985,9 @@ async fn poll_returns_pending_before_decision() {
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["contract"], "clavenar.pending-authorization/v1");
+    assert_eq!(body["status"], "pending");
+    assert_eq!(body["pending_id"], corr);
     assert_eq!(
         body["correlation_id"],
         serde_json::Value::String(corr.clone())
