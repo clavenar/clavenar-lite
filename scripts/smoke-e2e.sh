@@ -142,12 +142,15 @@ mcp_post() {
     # Writes status code to fd1, body to fd3 (passed as /tmp file).
     local tool="$1"
     local args="${2:-{\}}"
-    local body
+    local body idempotency_id
+    idempotency_id="$(cat /proc/sys/kernel/random/uuid)"
     body=$(printf '{"jsonrpc":"2.0","id":1,"method":"call_tool","params":{"name":"%s","arguments":%s}}' "$tool" "$args")
     curl -sS -o "$BODY" -D "$HEAD" -w '%{http_code}' \
         -X POST "http://localhost:$HOST_PORT/mcp" \
         -H "Authorization: Bearer $AGENT_TOKEN" \
         -H 'Content-Type: application/json' \
+        -H 'X-Clavenar-Server-Execution-Contract: clavenar.server-execution/v1' \
+        -H "X-Clavenar-Idempotency-Id: $idempotency_id" \
         -d "$body"
 }
 
