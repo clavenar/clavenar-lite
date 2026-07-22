@@ -6,6 +6,16 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-21
+
+### Security
+
+- Effect-capable `/mcp` requests now require an explicit decision or durable
+  server-execution selector. Unselected tool calls return non-executable HTTP
+  426 before mutable gates or effects; effect-free MCP control methods remain
+  compatible. The public migration guide and exact
+  `clavenar.client-migration/v1` fixture define the client-first rollout.
+
 ### Added
 
 - Yellow-tier `202` responses and durable pending poll views now identify the

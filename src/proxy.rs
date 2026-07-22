@@ -67,6 +67,8 @@ const IDEMPOTENCY_ID_HEADER: &str = "x-clavenar-idempotency-id";
 const SERVER_EXECUTION_CONTRACT_HEADER: &str = "x-clavenar-server-execution-contract";
 const SERVER_EXECUTION_CONTRACT: &str = "clavenar.server-execution/v1";
 const DECISION_CONTRACT: &str = "clavenar.decision/v1";
+const CLIENT_MIGRATION_CONTRACT: &str = "clavenar.client-migration/v1";
+const CLIENT_MIGRATION_GUIDE: &str = "https://clavenar.com/docs/sdk-migration/";
 const PENDING_AUTHORIZATION_CONTRACT: &str = "clavenar.pending-authorization/v1";
 
 #[derive(Clone, Copy, Debug)]
@@ -176,14 +178,41 @@ fn decision_error(error: &'static str, correlation_id: &str, mode: ClavenarMode)
         .into_response()
 }
 
+fn client_migration_required(correlation_id: &str, mode: ClavenarMode) -> Response {
+    (
+        StatusCode::UPGRADE_REQUIRED,
+        clavenar_headers(correlation_id, mode, false, false),
+        Json(serde_json::json!({
+            "contract": CLIENT_MIGRATION_CONTRACT,
+            "error": "client_contract_required",
+            "correlation_id": correlation_id,
+            "executable": false,
+            "migration_url": CLIENT_MIGRATION_GUIDE,
+            "supported_selectors": {
+                "decision": {
+                    "header": DECISION_CONTRACT_HEADER,
+                    "value": DECISION_CONTRACT
+                },
+                "server_execution": {
+                    "header": SERVER_EXECUTION_CONTRACT_HEADER,
+                    "value": SERVER_EXECUTION_CONTRACT
+                }
+            }
+        })),
+    )
+        .into_response()
+}
+
 fn server_execution_response(
     completed: ServerExecutionCompleted,
     correlation_id: &str,
     mode: ClavenarMode,
     replayed: bool,
+    would_deny: bool,
+    would_pend: bool,
 ) -> Response {
     let status = StatusCode::from_u16(completed.status).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
-    let mut headers = clavenar_headers(correlation_id, mode, false, false);
+    let mut headers = clavenar_headers(correlation_id, mode, would_deny, would_pend);
     headers.insert(
         "x-clavenar-execution-id",
         completed
@@ -1166,6 +1195,31 @@ async fn handle_mcp(
         .or_else(|| decision.map(|request| request.idempotency_id.to_string()))
         .unwrap_or(fallback_correlation_id);
 
+    // Parse before every mutable gate so an old inspection client cannot
+    // silently select server execution or create a rate-limit/Ledger effect.
+    let parsed: McpRequest = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                clavenar_headers(&correlation_id, state.mode, false, false),
+                format!("invalid JSON-RPC body: {error}"),
+            )
+                .into_response();
+        }
+    };
+    if parsed.method.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            clavenar_headers(&correlation_id, state.mode, false, false),
+            "method must be a non-empty string",
+        )
+            .into_response();
+    }
+    if server_execution.is_none() && decision.is_none() && !is_mcp_control_method(&parsed.method) {
+        return client_migration_required(&correlation_id, state.mode);
+    }
+
     // Bearer auth (if configured). `Authorization: Bearer <token>` —
     // any other shape is 401. Compared in constant time so the
     // matching-prefix length does not leak via response timing. In a
@@ -1265,32 +1319,6 @@ async fn handle_mcp(
         }
     };
 
-    // Parse + validate the request body. We use a permissive shape so
-    // the proxy doesn't refuse otherwise-valid MCP variants we don't
-    // happen to model — only `method` is required.
-    let parsed: McpRequest = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                clavenar_headers(&correlation_id, state.mode, false, false),
-                format!("invalid JSON-RPC body: {}", e),
-            )
-                .into_response();
-        }
-    };
-    // JSON-RPC 2.0 §4: `method` must be a non-empty string. Without
-    // this guard an empty method slides through to Brain / policy as
-    // tool_type="" and matches no rule, silently allowing the request.
-    if parsed.method.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            clavenar_headers(&correlation_id, state.mode, false, false),
-            "method must be a non-empty string",
-        )
-            .into_response();
-    }
-
     if server_execution.is_some() && is_mcp_control_method(&parsed.method) {
         return server_execution_error(
             StatusCode::BAD_REQUEST,
@@ -1349,7 +1377,14 @@ async fn handle_mcp(
         match state.ledger.inspect_server_execution(binding).await {
             Ok(ServerExecutionOutcome::Missing) => {}
             Ok(ServerExecutionOutcome::Completed(completed)) => {
-                return server_execution_response(completed, &correlation_id, state.mode, true);
+                return server_execution_response(
+                    completed,
+                    &correlation_id,
+                    state.mode,
+                    true,
+                    false,
+                    false,
+                );
             }
             Ok(ServerExecutionOutcome::Uncertain | ServerExecutionOutcome::Started) => {
                 return server_execution_error(
@@ -1632,7 +1667,14 @@ async fn handle_mcp(
         match state.ledger.begin_server_execution(binding).await {
             Ok(ServerExecutionOutcome::Started) => {}
             Ok(ServerExecutionOutcome::Completed(completed)) => {
-                return server_execution_response(completed, &correlation_id, state.mode, true);
+                return server_execution_response(
+                    completed,
+                    &correlation_id,
+                    state.mode,
+                    true,
+                    would_deny,
+                    would_pend,
+                );
             }
             Ok(ServerExecutionOutcome::Uncertain) => {
                 return server_execution_error(
@@ -1783,7 +1825,14 @@ async fn handle_mcp(
         },
     );
     if let Some(completed) = durable_completion {
-        return server_execution_response(completed, &correlation_id, state.mode, false);
+        return server_execution_response(
+            completed,
+            &correlation_id,
+            state.mode,
+            false,
+            would_deny,
+            would_pend,
+        );
     }
     (
         out_status,
@@ -1938,6 +1987,21 @@ mod tests {
         assert_eq!(lite["maximumEffectAttempts"], 1);
         assert_eq!(
             fixture["invariants"]["upstreamFailuresNeverEnterTransportRetryLoop"],
+            true
+        );
+    }
+
+    #[test]
+    fn packaged_client_migration_fixture_requires_explicit_effect_selection() {
+        let fixture: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../contracts/client-migration-v1.fixture.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["contract"], CLIENT_MIGRATION_CONTRACT);
+        assert_eq!(fixture["legacyRejection"]["httpStatus"], 426);
+        assert_eq!(fixture["legacyRejection"]["toolEffectCount"], 0);
+        assert_eq!(
+            fixture["invariants"]["effectCapableRequestsRequireExactlyOneSupportedSelector"],
             true
         );
     }

@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clavenar.com/contracts/client-migration-v1.schema.json",
+  "title": "Clavenar explicit client migration fixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "feature", "contract", "route", "migrationGuide", "minimumSafeVersions", "selections", "legacyRejection", "cases", "invariants"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "feature": {"const": "WP-06.11"},
+    "contract": {"const": "clavenar.client-migration/v1"},
+    "route": {"const": "POST /mcp"},
+    "migrationGuide": {"const": "https://clavenar.com/docs/sdk-migration/"},
+    "minimumSafeVersions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proxy", "lite", "rust", "typescript", "python", "go", "java", "dotnet"],
+      "properties": {
+        "proxy": {"const": "0.5.0"},
+        "lite": {"const": "0.9.0"},
+        "rust": {"const": "0.3.0"},
+        "typescript": {"const": "1.5.0"},
+        "python": {"const": "1.4.0"},
+        "go": {"const": "1.3.0"},
+        "java": {"const": "1.4.0"},
+        "dotnet": {"const": "1.5.0"}
+      }
+    },
+    "selections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "serverExecution", "controlPlane"],
+      "properties": {
+        "decision": {"$ref": "#/$defs/decisionSelection"},
+        "serverExecution": {"$ref": "#/$defs/serverSelection"},
+        "controlPlane": {"$ref": "#/$defs/controlSelection"}
+      }
+    },
+    "legacyRejection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["httpStatus", "error", "executable", "toolEffectCount", "before"],
+      "properties": {
+        "httpStatus": {"const": 426},
+        "error": {"const": "client_contract_required"},
+        "executable": {"const": false},
+        "toolEffectCount": {"const": 0},
+        "before": {
+          "const": ["authentication-mutation", "rate-limit", "policy", "hil", "ledger", "receipt", "upstream"]
+        }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "outcome", "httpStatus", "toolEffectCount"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "outcome": {"enum": ["upgrade_required", "control_allowed", "decision", "server_execution", "invalid"]},
+          "httpStatus": {"type": "integer", "minimum": 200, "maximum": 599},
+          "toolEffectCount": {"type": "integer", "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["effectCapableRequestsRequireExactlyOneSupportedSelector", "idempotencyIdentityExistsBeforeNetwork", "legacyInspectionCannotExecute", "decisionResponseIsNeverExecutable", "serverExecutionIsDurableAndAtMostOnce", "pendingResumeIsLookupOnly", "ambiguousOutcomesNeverReexecute", "receiptDeliveryNeverReexecutes"],
+      "properties": {
+        "effectCapableRequestsRequireExactlyOneSupportedSelector": {"const": true},
+        "idempotencyIdentityExistsBeforeNetwork": {"const": true},
+        "legacyInspectionCannotExecute": {"const": true},
+        "decisionResponseIsNeverExecutable": {"const": true},
+        "serverExecutionIsDurableAndAtMostOnce": {"const": true},
+        "pendingResumeIsLookupOnly": {"const": true},
+        "ambiguousOutcomesNeverReexecute": {"const": true},
+        "receiptDeliveryNeverReexecutes": {"const": true}
+      }
+    }
+  },
+  "$defs": {
+    "decisionSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["header", "value", "idempotencyHeader", "effectCapable", "automaticTransportRetryAllowed"],
+      "properties": {
+        "header": {"const": "x-clavenar-decision-contract"},
+        "value": {"const": "clavenar.decision/v1"},
+        "idempotencyHeader": {"const": "x-clavenar-idempotency-id"},
+        "effectCapable": {"const": false},
+        "automaticTransportRetryAllowed": {"const": true}
+      }
+    },
+    "serverSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["header", "value", "idempotencyHeader", "effectCapable", "automaticTransportRetryAllowed"],
+      "properties": {
+        "header": {"const": "x-clavenar-server-execution-contract"},
+        "value": {"const": "clavenar.server-execution/v1"},
+        "idempotencyHeader": {"const": "x-clavenar-idempotency-id"},
+        "effectCapable": {"const": true},
+        "automaticTransportRetryAllowed": {"const": false}
+      }
+    },
+    "controlSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "methods", "effectCapable", "toolEffectCount"],
+      "properties": {
+        "selector": {"const": "absent"},
+        "methods": {"const": ["initialize", "initialized", "notifications/*", "ping", "tools/list"]},
+        "effectCapable": {"const": false},
+        "toolEffectCount": {"const": 0}
+      }
+    }
+  }
+}

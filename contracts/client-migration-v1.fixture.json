@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "feature": "WP-06.11",
+  "contract": "clavenar.client-migration/v1",
+  "route": "POST /mcp",
+  "migrationGuide": "https://clavenar.com/docs/sdk-migration/",
+  "minimumSafeVersions": {
+    "proxy": "0.5.0",
+    "lite": "0.9.0",
+    "rust": "0.3.0",
+    "typescript": "1.5.0",
+    "python": "1.4.0",
+    "go": "1.3.0",
+    "java": "1.4.0",
+    "dotnet": "1.5.0"
+  },
+  "selections": {
+    "decision": {
+      "header": "x-clavenar-decision-contract",
+      "value": "clavenar.decision/v1",
+      "idempotencyHeader": "x-clavenar-idempotency-id",
+      "effectCapable": false,
+      "automaticTransportRetryAllowed": true
+    },
+    "serverExecution": {
+      "header": "x-clavenar-server-execution-contract",
+      "value": "clavenar.server-execution/v1",
+      "idempotencyHeader": "x-clavenar-idempotency-id",
+      "effectCapable": true,
+      "automaticTransportRetryAllowed": false
+    },
+    "controlPlane": {
+      "selector": "absent",
+      "methods": ["initialize", "initialized", "notifications/*", "ping", "tools/list"],
+      "effectCapable": false,
+      "toolEffectCount": 0
+    }
+  },
+  "legacyRejection": {
+    "httpStatus": 426,
+    "error": "client_contract_required",
+    "executable": false,
+    "toolEffectCount": 0,
+    "before": ["authentication-mutation", "rate-limit", "policy", "hil", "ledger", "receipt", "upstream"]
+  },
+  "cases": [
+    {"id": "unselected-tool-call", "outcome": "upgrade_required", "httpStatus": 426, "toolEffectCount": 0},
+    {"id": "unselected-initialize", "outcome": "control_allowed", "httpStatus": 200, "toolEffectCount": 0},
+    {"id": "unselected-tools-list", "outcome": "control_allowed", "httpStatus": 200, "toolEffectCount": 0},
+    {"id": "explicit-decision", "outcome": "decision", "httpStatus": 200, "toolEffectCount": 0},
+    {"id": "explicit-server-execution", "outcome": "server_execution", "httpStatus": 200, "toolEffectCount": 1},
+    {"id": "legacy-execution-selector", "outcome": "invalid", "httpStatus": 400, "toolEffectCount": 0},
+    {"id": "partial-selector-pair", "outcome": "invalid", "httpStatus": 400, "toolEffectCount": 0},
+    {"id": "mixed-selectors", "outcome": "invalid", "httpStatus": 400, "toolEffectCount": 0},
+    {"id": "unknown-selector-version", "outcome": "invalid", "httpStatus": 400, "toolEffectCount": 0}
+  ],
+  "invariants": {
+    "effectCapableRequestsRequireExactlyOneSupportedSelector": true,
+    "idempotencyIdentityExistsBeforeNetwork": true,
+    "legacyInspectionCannotExecute": true,
+    "decisionResponseIsNeverExecutable": true,
+    "serverExecutionIsDurableAndAtMostOnce": true,
+    "pendingResumeIsLookupOnly": true,
+    "ambiguousOutcomesNeverReexecute": true,
+    "receiptDeliveryNeverReexecutes": true
+  }
+}

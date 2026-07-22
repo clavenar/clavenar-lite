@@ -1,6 +1,6 @@
 [package]
 name = "clavenar-lite"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 description = "Community Edition of Clavenar — single-binary OSS proxy with embedded heuristic Brain, Rego policy engine, and SHA-256 hash-chained ledger."
 license = "Apache-2.0"

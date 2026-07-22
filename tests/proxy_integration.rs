@@ -21,6 +21,35 @@ use clavenar_lite::ledger::Ledger;
 use clavenar_lite::policy::PolicyEngine;
 use clavenar_lite::proxy::{AgentRegistry, AppState, ClavenarMode, build_router};
 
+trait DecisionRequestExt {
+    fn decision_post<U: reqwest::IntoUrl>(&self, url: U) -> reqwest::RequestBuilder;
+    fn server_post<U: reqwest::IntoUrl>(&self, url: U) -> reqwest::RequestBuilder;
+}
+
+impl DecisionRequestExt for reqwest::Client {
+    fn decision_post<U: reqwest::IntoUrl>(&self, url: U) -> reqwest::RequestBuilder {
+        self.post(url)
+            .header("x-clavenar-decision-contract", "clavenar.decision/v1")
+            .header(
+                "x-clavenar-idempotency-id",
+                uuid::Uuid::new_v4().to_string(),
+            )
+    }
+
+    fn server_post<U: reqwest::IntoUrl>(&self, url: U) -> reqwest::RequestBuilder {
+        self.post(url)
+            .bearer_auth("test-token")
+            .header(
+                "x-clavenar-server-execution-contract",
+                "clavenar.server-execution/v1",
+            )
+            .header(
+                "x-clavenar-idempotency-id",
+                uuid::Uuid::new_v4().to_string(),
+            )
+    }
+}
+
 fn policies_dir() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("policies");
@@ -102,7 +131,7 @@ async fn decision_selector_is_side_effect_free_and_invalid_forms_fail_early() {
     });
 
     let decision = client
-        .post(format!("http://{lite}/mcp"))
+        .decision_post(format!("http://{lite}/mcp"))
         .header("x-clavenar-decision-contract", "clavenar.decision/v1")
         .header(
             "x-clavenar-idempotency-id",
@@ -154,8 +183,12 @@ async fn decision_selector_is_side_effect_free_and_invalid_forms_fail_early() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    assert_eq!(response.status(), reqwest::StatusCode::UPGRADE_REQUIRED);
+    let error: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(error["contract"], "clavenar.client-migration/v1");
+    assert_eq!(error["error"], "client_contract_required");
+    assert_eq!(error["executable"], false);
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -326,7 +359,7 @@ async fn spawn_lite_verbose(upstream_url: String) -> (SocketAddr, Arc<Ledger>) {
 /// below.
 async fn park_wire_transfer(lite_addr: SocketAddr) -> String {
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -351,10 +384,14 @@ async fn park_wire_transfer(lite_addr: SocketAddr) -> String {
 #[tokio::test]
 async fn happy_path_routine_request_forwards_and_logs() {
     let upstream = spawn_stub_upstream().await;
-    let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
+    let (lite_addr, ledger) = spawn_lite(
+        format!("http://{}/mcp", upstream),
+        Some("test-token".to_string()),
+    )
+    .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .server_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -370,10 +407,12 @@ async fn happy_path_routine_request_forwards_and_logs() {
     assert_eq!(body["result"]["ok"], serde_json::json!(true));
 
     // One ledger entry, authorized=true, intent=Routine.
-    let entries = ledger.entries_for_agent("anonymous").await.unwrap();
-    assert_eq!(entries.len(), 1);
-    assert!(entries[0].authorized);
-    assert_eq!(entries[0].intent_category, "Routine");
+    let entries = ledger.entries_for_agent("bearer-agent").await.unwrap();
+    let inspection = entries
+        .iter()
+        .find(|entry| entry.intent_category == "Routine")
+        .expect("routine inspection ledger row");
+    assert!(inspection.authorized);
 }
 
 #[tokio::test]
@@ -382,7 +421,7 @@ async fn injection_blocked_with_403_and_logged() {
     let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -415,7 +454,7 @@ async fn verbose_verdicts_attach_detector_breakdown_on_deny() {
     let (lite_addr, _ledger) = spawn_lite_verbose(format!("http://{}/mcp", upstream)).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -449,13 +488,13 @@ async fn observe_mode_forwards_what_enforce_would_deny() {
     let upstream = spawn_stub_upstream().await;
     let (lite_addr, ledger) = spawn_lite_with_mode(
         format!("http://{}/mcp", upstream),
-        None,
+        Some("test-token".to_string()),
         ClavenarMode::Observe,
     )
     .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .server_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -488,10 +527,12 @@ async fn observe_mode_forwards_what_enforce_would_deny() {
     );
 
     // Ledger still tells the truth about what the pipeline thought.
-    let entries = ledger.entries_for_agent("anonymous").await.unwrap();
-    assert_eq!(entries.len(), 1);
-    assert!(!entries[0].authorized);
-    assert_eq!(entries[0].intent_category, "PromptInjection");
+    let entries = ledger.entries_for_agent("bearer-agent").await.unwrap();
+    let inspection = entries
+        .iter()
+        .find(|entry| entry.intent_category == "PromptInjection")
+        .expect("prompt-injection inspection ledger row");
+    assert!(!inspection.authorized);
 }
 
 #[tokio::test]
@@ -508,7 +549,7 @@ async fn observe_mode_does_not_set_would_deny_for_allowed_requests() {
     .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -541,7 +582,7 @@ async fn correlation_id_round_trips_to_ledger_row() {
     let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -586,7 +627,7 @@ async fn correlation_id_present_on_403_deny() {
     let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -632,7 +673,7 @@ async fn correlation_id_present_on_401_auth_fail() {
     .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         // wrong bearer token on purpose
         .header("Authorization", "Bearer wrong-token")
         .json(&serde_json::json!({ "jsonrpc": "2.0", "method": "call_tool" }))
@@ -653,7 +694,7 @@ async fn sql_execute_policy_blocked() {
     let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -696,7 +737,7 @@ async fn wire_transfer_parks_for_review_with_202() {
     let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -760,13 +801,13 @@ async fn observe_mode_yellow_tier_forwards_with_would_pend_header() {
     let upstream = spawn_stub_upstream().await;
     let (lite_addr, ledger) = spawn_lite_with_mode(
         format!("http://{}/mcp", upstream),
-        None,
+        Some("test-token".to_string()),
         ClavenarMode::Observe,
     )
     .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .server_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -802,10 +843,12 @@ async fn observe_mode_yellow_tier_forwards_with_would_pend_header() {
     // operator workflow attached to it.
     assert!(ledger.get_pending(&header_id).await.unwrap().is_none());
 
-    let entries = ledger.entries_for_agent("anonymous").await.unwrap();
-    assert_eq!(entries.len(), 1);
-    assert!(!entries[0].authorized);
-    assert_eq!(entries[0].intent_category, "PendingReview");
+    let entries = ledger.entries_for_agent("bearer-agent").await.unwrap();
+    let inspection = entries
+        .iter()
+        .find(|entry| entry.intent_category == "PendingReview")
+        .expect("pending-review inspection ledger row");
+    assert!(!inspection.authorized);
 }
 
 #[tokio::test]
@@ -819,7 +862,7 @@ async fn bearer_token_required_when_set() {
 
     // No token → 401.
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "method": "call_tool",
             "params": { "name": "ping" }
@@ -831,7 +874,7 @@ async fn bearer_token_required_when_set() {
 
     // Wrong token → still 401.
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .header("Authorization", "Bearer wrong-token")
         .json(&serde_json::json!({
             "method": "call_tool",
@@ -844,7 +887,7 @@ async fn bearer_token_required_when_set() {
 
     // Right token → 200.
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .header("Authorization", "Bearer secret-token-xyz")
         .json(&serde_json::json!({
             "method": "call_tool",
@@ -876,7 +919,7 @@ async fn ledger_chain_verifies_after_burst() {
             })
         };
         let _ = client
-            .post(format!("http://{}/mcp", lite_addr))
+            .decision_post(format!("http://{}/mcp", lite_addr))
             .json(&body)
             .send()
             .await
@@ -898,7 +941,7 @@ async fn malformed_body_returns_400() {
     let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .header("Content-Type", "application/json")
         .body("not-json-at-all")
         .send()
@@ -916,7 +959,7 @@ async fn empty_method_rejected() {
     let (lite_addr, ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1120,7 +1163,7 @@ async fn poll_requires_bearer_token_when_configured() {
     // Park a wire_transfer under the configured bearer.
     let client = reqwest::Client::new();
     let park = client
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .header("Authorization", "Bearer agent-secret")
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -1479,7 +1522,7 @@ async fn slack_webhook_failure_does_not_break_park() {
     .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1539,7 +1582,7 @@ async fn multi_agent_routes_each_token_to_its_own_agent_id() {
 
     // Agent A
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .header("Authorization", "Bearer tok-a")
         .json(&serde_json::json!({"method": "call_tool", "params": {"name": "ping"}}))
         .send()
@@ -1549,7 +1592,7 @@ async fn multi_agent_routes_each_token_to_its_own_agent_id() {
 
     // Agent B
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .header("Authorization", "Bearer tok-b")
         .json(&serde_json::json!({"method": "call_tool", "params": {"name": "ping"}}))
         .send()
@@ -1579,7 +1622,7 @@ async fn multi_agent_rejects_unknown_token() {
         spawn_lite_with_registry(format!("http://{}/mcp", upstream), registry).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .header("Authorization", "Bearer wrong-token")
         .json(&serde_json::json!({"method": "call_tool", "params": {"name": "ping"}}))
         .send()
@@ -1661,7 +1704,7 @@ async fn callback_url_rejected_when_no_allowlist_configured() {
         spawn_lite_with_callbacks(format!("http://{}/mcp", upstream), Vec::new()).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .header("X-Clavenar-Callback-URL", "https://x.example.com/cb")
         .json(&serde_json::json!({
             "method": "call_tool",
@@ -1688,7 +1731,7 @@ async fn callback_url_rejected_when_off_allowlist() {
     .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .header("X-Clavenar-Callback-URL", "https://evil.example.com/cb")
         .json(&serde_json::json!({
             "method": "call_tool",
@@ -1713,7 +1756,7 @@ async fn callback_url_fires_on_decide() {
 
     // Park a wire_transfer (Yellow tier) with a callback URL.
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
         .header("X-Clavenar-Callback-URL", &cb_url)
         .json(&serde_json::json!({
             "method": "call_tool",
@@ -1772,7 +1815,7 @@ async fn spawn_lite_with_webhook(
         tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url,
         http: reqwest::Client::new(),
-        agents: None,
+        agents: Some(AgentRegistry::single("test-token".to_string())),
         decide_token: None,
         upstream_api_key: None,
         mode,
@@ -1823,7 +1866,8 @@ async fn webhook_fires_allow_event_on_green_tier() {
     .await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
+        .bearer_auth("test-token")
         .json(&serde_json::json!({"method": "call_tool", "params": {"name": "ping"}}))
         .send()
         .await
@@ -1854,7 +1898,8 @@ async fn webhook_fires_deny_event_on_red_tier() {
 
     // Prompt-injection signal triggers a Brain red — pipeline 403s.
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
+        .bearer_auth("test-token")
         .json(&serde_json::json!({
             "method": "call_tool",
             "params": {
@@ -1885,7 +1930,8 @@ async fn webhook_fires_park_then_decide_event_for_yellow_tier() {
 
     // wire_transfer hits the policy review rule → yellow tier → park.
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .decision_post(format!("http://{}/mcp", lite_addr))
+        .bearer_auth("test-token")
         .json(&serde_json::json!({
             "method": "call_tool",
             "params": {
@@ -1940,7 +1986,7 @@ async fn webhook_fires_would_deny_in_observe_mode() {
     // Same injection input as the enforce-mode deny test, but observe
     // mode forwards upstream and the webhook reports `would_deny`.
     let resp = reqwest::Client::new()
-        .post(format!("http://{}/mcp", lite_addr))
+        .server_post(format!("http://{}/mcp", lite_addr))
         .json(&serde_json::json!({
             "method": "call_tool",
             "params": {
@@ -2005,7 +2051,7 @@ async fn rate_limit_gate_emits_429_with_json_body_and_ledger_row() {
     let client = reqwest::Client::new();
     let req = || {
         client
-            .post(format!("http://{}/mcp", lite_addr))
+            .decision_post(format!("http://{}/mcp", lite_addr))
             .bearer_auth("tok")
             .json(&serde_json::json!({
                 "method": "call_tool",

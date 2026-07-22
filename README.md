@@ -350,7 +350,11 @@ automatically — no manual SQL surgery needed.
 `clavenar.decision/v1` request is side-effect-free and returns only its
 decision; partial, unknown, or mixed selectors fail before policy, ledger, or
 upstream access. A governed SDK request is never silently reinterpreted as
-server execution.
+server execution. Beginning with 0.9.0, an unselected effect-capable request
+returns HTTP 426 `client_contract_required` before rate limiting, policy,
+pending state, Ledger, receipt, or upstream effects. Selector-free MCP control
+methods remain compatible. Upgrade clients first by following
+<https://clavenar.com/docs/sdk-migration/>.
 
 Authenticated callers can opt into durable server execution by pairing
 `x-clavenar-server-execution-contract: clavenar.server-execution/v1` with a
@@ -361,8 +365,8 @@ stage before returning. An exact completed retry returns the retained bytes
 with `x-clavenar-server-execution-replayed: true`; a changed request conflicts,
 and an interrupted in-flight identity returns `server_execution_uncertain`
 without another upstream attempt. Anonymous mode cannot select this contract.
-Lite makes exactly one upstream attempt for both selected and legacy server
-execution. It never automatically retries an effect-capable request; callers
+Lite makes exactly one upstream attempt for selected server execution. It never
+automatically retries an effect-capable request; callers
 recover a selected request only through its durable completed replay or
 explicit uncertain outcome.
 
