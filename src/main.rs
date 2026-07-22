@@ -902,6 +902,36 @@ async fn run_start(cfg: StartConfig) -> i32 {
          Fires before brain/policy work runs; the denial also emits a ledger row \
          with intent_category=\"RateLimitDenied\"."
     );
+    metrics::describe_gauge!(
+        "clavenar_forensic_outbox_depth",
+        "Embedded server-execution forensic obligations by bounded state={ready,retry,terminal}."
+    );
+    metrics::describe_gauge!(
+        "clavenar_forensic_outbox_oldest_age_seconds",
+        "Age of the oldest pending embedded forensic obligation."
+    );
+    metrics::describe_counter!(
+        "clavenar_forensic_outbox_retry_attempts_total",
+        "Failed forensic delivery attempts; the embedded authoritative ledger needs no broker retry."
+    );
+    metrics::describe_counter!(
+        "clavenar_forensic_outbox_terminal_failures_total",
+        "Non-retryable embedded forensic persistence failures."
+    );
+    metrics::describe_counter!(
+        "clavenar_forensic_reconciliation_total",
+        "Interrupted selected executions classified by bounded outcome={resolved,failed,uncertain}."
+    );
+    metrics::describe_gauge!(
+        "clavenar_forensic_reconciliation_pending",
+        "Selected executions awaiting completion or post-restart reconciliation."
+    );
+    metrics::describe_gauge!(
+        "clavenar_forensic_missing_stages",
+        "Versioned Lite execution intents missing a required terminal after grace."
+    );
+
+    state.ledger.spawn_server_execution_reconciler();
 
     let app = build_router(state).route(
         "/metrics",

@@ -268,6 +268,7 @@ impl From<rusqlite::Error> for DecideError {
 
 pub struct Ledger {
     conn: Arc<Mutex<Connection>>,
+    instance_id: String,
 }
 
 impl Ledger {
@@ -285,6 +286,7 @@ impl Ledger {
         init_schema(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            instance_id: Uuid::new_v4().to_string(),
         })
     }
 
@@ -349,8 +351,10 @@ impl Ledger {
         tx.execute(
             "INSERT INTO server_executions
              (agent_id, idempotency_id, execution_id, correlation_id, route, method,
-              tool_name, submitted_request_sha256, effective_request_sha256, state, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'in_flight', ?10)",
+              tool_name, submitted_request_sha256, effective_request_sha256, state, created_at,
+              reconciliation_state, owner_instance)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'in_flight', ?10,
+                     'pending', ?11)",
             rusqlite::params![
                 binding.agent_id,
                 binding.idempotency_id.to_string(),
@@ -362,6 +366,7 @@ impl Ledger {
                 binding.submitted_request_sha256,
                 binding.effective_request_sha256,
                 Utc::now().to_rfc3339(),
+                self.instance_id,
             ],
         )?;
         append_on_connection(
@@ -432,7 +437,9 @@ impl Ledger {
         let changed = tx.execute(
             "UPDATE server_executions
              SET state = 'completed', response_status = ?1, response_content_type = ?2,
-                 response_body = ?3, result_sha256 = ?4, receipt_json = ?5, completed_at = ?6
+                 response_body = ?3, result_sha256 = ?4, receipt_json = ?5, completed_at = ?6,
+                 reconciliation_state = 'resolved', last_reconciled_at = ?6,
+                 reconciliation_error = NULL, reconciliation_resolved_at = ?6
              WHERE agent_id = ?7 AND idempotency_id = ?8 AND state = 'in_flight'
                AND effective_request_sha256 = ?9",
             rusqlite::params![
@@ -482,6 +489,181 @@ impl Ledger {
             result_sha256,
             receipt_json,
         })
+    }
+
+    /// Periodically classify only abandoned intents owned by a prior process.
+    /// The worker records explicit uncertainty in the embedded authoritative
+    /// ledger and never invokes the upstream effect.
+    pub fn spawn_server_execution_reconciler(self: &Arc<Self>) {
+        let ledger = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                match ledger.reconcile_server_executions_once().await {
+                    Ok(changed) if changed > 0 => {
+                        metrics::counter!(
+                            "clavenar_forensic_reconciliation_total",
+                            "outcome" => "uncertain"
+                        )
+                        .increment(changed);
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(
+                        "Lite server-execution reconciliation failed without effect retry: {error}"
+                    ),
+                }
+                if let Err(error) = ledger.refresh_forensic_metrics().await {
+                    tracing::warn!("Lite forensic telemetry refresh failed: {error}");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+    }
+
+    async fn reconcile_server_executions_once(&self) -> rusqlite::Result<u64> {
+        self.reconcile_server_executions_at(Utc::now()).await
+    }
+
+    async fn reconcile_server_executions_at(&self, now: DateTime<Utc>) -> rusqlite::Result<u64> {
+        let cutoff = (now - chrono::Duration::seconds(300)).to_rfc3339();
+        let now = now.to_rfc3339();
+        let mut conn = self.conn.lock().await;
+        let tx = conn.transaction()?;
+        let rows = {
+            let mut stmt = tx.prepare(
+                "SELECT execution_id, agent_id, idempotency_id, correlation_id, method,
+                        tool_name, submitted_request_sha256, effective_request_sha256
+                   FROM server_executions
+                  WHERE state='in_flight' AND reconciliation_state='pending'
+                    AND created_at <= ?1
+                    AND owner_instance IS NOT NULL AND owner_instance <> ?2
+                  ORDER BY created_at LIMIT 256",
+            )?;
+            stmt.query_map(rusqlite::params![cutoff, self.instance_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (
+            execution_id,
+            agent_id,
+            idempotency_id,
+            correlation_id,
+            method,
+            tool_name,
+            submitted_request_sha256,
+            effective_request_sha256,
+        ) in &rows
+        {
+            let event_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("clavenar.server-execution/v1\0reconciliation\0{execution_id}\0uncertain")
+                    .as_bytes(),
+            );
+            let changed = tx.execute(
+                "UPDATE server_executions
+                    SET reconciliation_state='uncertain',
+                        reconciliation_attempts=reconciliation_attempts + 1,
+                        last_reconciled_at=?2,
+                        reconciliation_error='authoritative upstream result unavailable; automatic effect retry forbidden',
+                        reconciliation_resolved_at=?2
+                  WHERE execution_id=?1 AND state='in_flight'
+                    AND reconciliation_state='pending'",
+                rusqlite::params![execution_id, now],
+            )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let receipt = serde_json::json!({
+                "contract": "clavenar.server-execution/v1",
+                "stage": "execution.uncertain",
+                "execution_id": execution_id,
+                "idempotency_id": idempotency_id,
+                "route": "/mcp",
+                "method": method,
+                "tool_name": tool_name,
+                "submitted_request_sha256": submitted_request_sha256,
+                "effective_request_sha256": effective_request_sha256,
+                "reconciliation": "uncertain",
+            });
+            tx.execute(
+                "INSERT INTO server_execution_outbox
+                    (event_id, execution_id, payload_json, created_at, delivered_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                rusqlite::params![event_id.to_string(), execution_id, receipt.to_string(), now],
+            )?;
+            append_on_connection(
+                &tx,
+                LogRequest {
+                    agent_id: agent_id.clone(),
+                    method: method.clone(),
+                    intent_category: "ServerExecutionUncertain".to_string(),
+                    authorized: false,
+                    reasoning: "interrupted durable server execution has no authoritative retained result; automatic upstream retry forbidden".to_string(),
+                    policy_decision: Some(receipt),
+                    correlation_id: Some(correlation_id.clone()),
+                },
+            )?;
+        }
+        tx.commit()?;
+        Ok(rows.len() as u64)
+    }
+
+    async fn refresh_forensic_metrics(&self) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().await;
+        let (ready, oldest): (i64, Option<String>) = conn.query_row(
+            "SELECT COUNT(*), MIN(created_at) FROM server_execution_outbox
+              WHERE delivered_at IS NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let (pending, missing): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(CASE WHEN reconciliation_state='pending' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN reconciliation_state='pending'
+                        AND julianday(created_at) <= julianday('now', '-300 seconds') THEN 1 ELSE 0 END), 0)
+               FROM server_executions",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let age = oldest
+            .as_deref()
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| {
+                Utc::now()
+                    .signed_duration_since(value.with_timezone(&Utc))
+                    .num_seconds()
+                    .max(0) as f64
+            })
+            .unwrap_or(0.0);
+        metrics::gauge!("clavenar_forensic_outbox_depth", "state" => "ready").set(ready as f64);
+        metrics::gauge!("clavenar_forensic_outbox_depth", "state" => "retry").set(0.0);
+        metrics::gauge!("clavenar_forensic_outbox_depth", "state" => "terminal").set(0.0);
+        metrics::gauge!("clavenar_forensic_outbox_oldest_age_seconds").set(age);
+        metrics::gauge!("clavenar_forensic_reconciliation_pending").set(pending as f64);
+        metrics::gauge!(
+            "clavenar_forensic_missing_stages",
+            "family" => "lite",
+            "stage" => "execution.completed"
+        )
+        .set(missing as f64);
+        metrics::counter!("clavenar_forensic_outbox_retry_attempts_total").increment(0);
+        metrics::counter!("clavenar_forensic_outbox_terminal_failures_total").increment(0);
+        for outcome in ["resolved", "failed", "uncertain"] {
+            metrics::counter!(
+                "clavenar_forensic_reconciliation_total",
+                "outcome" => outcome
+            )
+            .increment(0);
+        }
+        Ok(())
     }
 
     /// Walk every entry in seq order, recompute each hash, and confirm
@@ -966,6 +1148,13 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             receipt_json TEXT,
             created_at TEXT NOT NULL,
             completed_at TEXT,
+            reconciliation_state TEXT NOT NULL DEFAULT 'legacy'
+                CHECK(reconciliation_state IN ('legacy', 'pending', 'resolved', 'uncertain')),
+            reconciliation_attempts INTEGER NOT NULL DEFAULT 0,
+            last_reconciled_at TEXT,
+            reconciliation_error TEXT,
+            reconciliation_resolved_at TEXT,
+            owner_instance TEXT,
             PRIMARY KEY (agent_id, idempotency_id)
          );
          CREATE TABLE IF NOT EXISTS server_execution_outbox (
@@ -1020,6 +1209,34 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !has_pending_column(conn, "callback_url")? {
         conn.execute("ALTER TABLE pendings ADD COLUMN callback_url TEXT", [])?;
+    }
+    fn has_server_execution_column(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+        let mut stmt = conn.prepare("PRAGMA table_info(server_executions)")?;
+        let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for column in names {
+            if column? == name {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    for (name, definition) in [
+        (
+            "reconciliation_state",
+            "TEXT NOT NULL DEFAULT 'legacy' CHECK(reconciliation_state IN ('legacy', 'pending', 'resolved', 'uncertain'))",
+        ),
+        ("reconciliation_attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_reconciled_at", "TEXT"),
+        ("reconciliation_error", "TEXT"),
+        ("reconciliation_resolved_at", "TEXT"),
+        ("owner_instance", "TEXT"),
+    ] {
+        if !has_server_execution_column(conn, name)? {
+            conn.execute(
+                &format!("ALTER TABLE server_executions ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
     }
     Ok(())
 }
@@ -1501,6 +1718,16 @@ mod tests {
             ledger.inspect_server_execution(&binding).await.unwrap(),
             ServerExecutionOutcome::Completed(_)
         ));
+        let conn = ledger.conn.lock().await;
+        let state: String = conn
+            .query_row(
+                "SELECT reconciliation_state FROM server_executions",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "resolved");
+        drop(conn);
         assert!(ledger.verify().await.unwrap().valid);
     }
 
@@ -1518,5 +1745,46 @@ mod tests {
             ledger.inspect_server_execution(&substituted).await.unwrap(),
             ServerExecutionOutcome::Conflict
         ));
+    }
+
+    #[tokio::test]
+    async fn prior_process_execution_becomes_chain_recorded_uncertainty_without_retry() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let binding = server_binding();
+        {
+            let ledger = Ledger::open(file.path().to_str().unwrap()).unwrap();
+            assert!(matches!(
+                ledger.begin_server_execution(&binding).await.unwrap(),
+                ServerExecutionOutcome::Started
+            ));
+        }
+        let restarted = Ledger::open(file.path().to_str().unwrap()).unwrap();
+        let changed = restarted
+            .reconcile_server_executions_at(Utc::now() + chrono::Duration::minutes(10))
+            .await
+            .unwrap();
+        assert_eq!(changed, 1);
+        let conn = restarted.conn.lock().await;
+        let retained: (String, i64, i64, i64) = conn
+            .query_row(
+                "SELECT reconciliation_state, reconciliation_attempts,
+                        (SELECT COUNT(*) FROM server_execution_outbox),
+                        (SELECT COUNT(*) FROM entries
+                          WHERE intent_category='ServerExecutionUncertain')
+                   FROM server_executions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(retained, ("uncertain".to_string(), 1, 1, 1));
+        drop(conn);
+        assert_eq!(
+            restarted
+                .reconcile_server_executions_at(Utc::now() + chrono::Duration::minutes(20))
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(restarted.verify().await.unwrap().valid);
     }
 }
