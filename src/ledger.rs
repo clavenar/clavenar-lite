@@ -177,6 +177,7 @@ pub struct VerifyResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pending {
     pub correlation_id: String,
+    pub tenant: String,
     pub agent_id: String,
     pub tool_type: String,
     pub method: String,
@@ -218,6 +219,7 @@ pub enum PendingSort {
 #[derive(Debug, Clone)]
 pub struct ParkRequest {
     pub correlation_id: String,
+    pub tenant: String,
     pub agent_id: String,
     pub tool_type: String,
     pub method: String,
@@ -726,11 +728,12 @@ impl Ledger {
         let review_reasons_json =
             serde_json::to_string(&req.review_reasons).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
-            "INSERT INTO pendings (correlation_id, agent_id, tool_type, method,
+            "INSERT INTO pendings (correlation_id, tenant, agent_id, tool_type, method,
                                    review_reasons_json, requested_at, callback_url)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 req.correlation_id,
+                req.tenant,
                 req.agent_id,
                 req.tool_type,
                 req.method,
@@ -741,6 +744,7 @@ impl Ledger {
         )?;
         Ok(Pending {
             correlation_id: req.correlation_id,
+            tenant: req.tenant,
             agent_id: req.agent_id,
             tool_type: req.tool_type,
             method: req.method,
@@ -778,7 +782,7 @@ impl Ledger {
         let pending = {
             let mut stmt = conn.prepare(
                 "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
-                        requested_at, decided_at, decision, decider_note, callback_url
+                        requested_at, decided_at, decision, decider_note, callback_url, tenant
                  FROM pendings WHERE correlation_id = ?1",
             )?;
             let mut rows = stmt.query([correlation_id])?;
@@ -836,7 +840,7 @@ impl Ledger {
         };
         let sql = format!(
             "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
-                    requested_at, decided_at, decision, decider_note, callback_url
+                    requested_at, decided_at, decision, decider_note, callback_url, tenant
              FROM pendings {} ORDER BY requested_at {} LIMIT ?1",
             where_clause, order_dir
         );
@@ -852,10 +856,32 @@ impl Ledger {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
-                    requested_at, decided_at, decision, decider_note, callback_url
+                    requested_at, decided_at, decision, decider_note, callback_url, tenant
              FROM pendings WHERE correlation_id = ?1",
         )?;
         let mut rows = stmt.query([correlation_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row_to_pending(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Look up a pending through the issuing tenant/agent partition.
+    /// A correlation id is not an authorization boundary by itself.
+    pub async fn get_pending_for_agent(
+        &self,
+        correlation_id: &str,
+        tenant: &str,
+        agent_id: &str,
+    ) -> rusqlite::Result<Option<Pending>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
+                    requested_at, decided_at, decision, decider_note, callback_url, tenant
+             FROM pendings
+             WHERE correlation_id = ?1 AND tenant = ?2 AND agent_id = ?3",
+        )?;
+        let mut rows = stmt.query(rusqlite::params![correlation_id, tenant, agent_id])?;
         match rows.next()? {
             Some(row) => Ok(Some(row_to_pending(row)?)),
             None => Ok(None),
@@ -1119,6 +1145,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
          CREATE INDEX IF NOT EXISTS idx_entries_correlation_id ON entries(correlation_id);
          CREATE TABLE IF NOT EXISTS pendings (
             correlation_id TEXT PRIMARY KEY,
+            tenant TEXT NOT NULL,
             agent_id TEXT NOT NULL,
             tool_type TEXT NOT NULL,
             method TEXT NOT NULL,
@@ -1130,6 +1157,8 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             callback_url TEXT
          );
          CREATE INDEX IF NOT EXISTS idx_pendings_decided_at ON pendings(decided_at);
+         CREATE INDEX IF NOT EXISTS idx_pendings_tenant_agent
+             ON pendings(tenant, agent_id);
          CREATE TABLE IF NOT EXISTS server_executions (
             agent_id TEXT NOT NULL,
             idempotency_id TEXT NOT NULL,
@@ -1210,6 +1239,16 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     if !has_pending_column(conn, "callback_url")? {
         conn.execute("ALTER TABLE pendings ADD COLUMN callback_url TEXT", [])?;
     }
+    if !has_pending_column(conn, "tenant")? {
+        conn.execute(
+            "ALTER TABLE pendings ADD COLUMN tenant TEXT NOT NULL DEFAULT '_legacy_unqualified'",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pendings_tenant_agent ON pendings(tenant, agent_id)",
+        [],
+    )?;
     fn has_server_execution_column(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
         let mut stmt = conn.prepare("PRAGMA table_info(server_executions)")?;
         let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -1287,6 +1326,7 @@ fn row_to_pending(row: &rusqlite::Row) -> rusqlite::Result<Pending> {
     let decision: Option<String> = row.get(7)?;
     let decider_note: Option<String> = row.get(8)?;
     let callback_url: Option<String> = row.get(9)?;
+    let tenant: String = row.get(10)?;
     let review_reasons: Vec<String> =
         serde_json::from_str(&review_reasons_json).unwrap_or_default();
     let requested_at = DateTime::parse_from_rfc3339(&requested_at_str)
@@ -1309,6 +1349,7 @@ fn row_to_pending(row: &rusqlite::Row) -> rusqlite::Result<Pending> {
         .transpose()?;
     Ok(Pending {
         correlation_id,
+        tenant,
         agent_id,
         tool_type,
         method,
@@ -1439,6 +1480,7 @@ mod tests {
         let parked = ledger
             .park_pending(ParkRequest {
                 correlation_id: "abc-123".to_string(),
+                tenant: "acme".to_string(),
                 agent_id: "agent-1".to_string(),
                 tool_type: "transfer_funds".to_string(),
                 method: "call_tool".to_string(),
@@ -1472,6 +1514,7 @@ mod tests {
         ledger
             .park_pending(ParkRequest {
                 correlation_id: correlation_id.to_string(),
+                tenant: "acme".to_string(),
                 agent_id: "agent-1".to_string(),
                 tool_type: "wire_transfer".to_string(),
                 method: "call_tool".to_string(),
@@ -1480,6 +1523,55 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn same_agent_name_persists_distinct_pending_tenants() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        for (tenant, correlation_id) in [("acme", "p-acme"), ("globex", "p-globex")] {
+            ledger
+                .park_pending(ParkRequest {
+                    correlation_id: correlation_id.to_string(),
+                    tenant: tenant.to_string(),
+                    agent_id: "bot".to_string(),
+                    tool_type: "wire_transfer".to_string(),
+                    method: "call_tool".to_string(),
+                    review_reasons: vec!["review".to_string()],
+                    callback_url: None,
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            ledger.get_pending("p-acme").await.unwrap().unwrap().tenant,
+            "acme"
+        );
+        assert_eq!(
+            ledger
+                .get_pending("p-globex")
+                .await
+                .unwrap()
+                .unwrap()
+                .tenant,
+            "globex"
+        );
+        assert!(
+            ledger
+                .get_pending_for_agent("p-acme", "globex", "bot")
+                .await
+                .unwrap()
+                .is_none(),
+            "same agent name in another tenant must not authorize the row"
+        );
+        assert_eq!(
+            ledger
+                .get_pending_for_agent("p-acme", "acme", "bot")
+                .await
+                .unwrap()
+                .unwrap()
+                .tenant,
+            "acme"
+        );
     }
 
     #[tokio::test]

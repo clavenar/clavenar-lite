@@ -109,15 +109,15 @@ fn diff_against_pin(
 /// Pin-or-diff a `tools/list` response. First sighting pins; a later
 /// list that diverges from the pin appends a `tool_schema_poisoned`
 /// forensic row so a rug-pull is visible in the audit chain.
-pub async fn observe_tools_list(state: &AppState, agent_id: &str, body: &[u8]) {
+pub async fn observe_tools_list(state: &AppState, agent_key: &str, agent_id: &str, body: &[u8]) {
     let Some(fresh) = definition_hashes(body) else {
         return;
     };
     let changes = {
         let mut pins = state.tool_pins.pins.lock().expect("tool pin lock");
-        match pins.get(agent_id) {
+        match pins.get(agent_key) {
             None => {
-                pins.insert(agent_id.to_string(), fresh);
+                pins.insert(agent_key.to_string(), fresh);
                 return;
             }
             Some(pinned) => diff_against_pin(pinned, &fresh),
@@ -174,6 +174,20 @@ mod tests {
         let changes = diff_against_pin(&pinned, &fresh);
         assert_eq!(changes.len(), 1);
         assert!(changes[0].contains("definition changed"));
+    }
+
+    #[test]
+    fn same_agent_name_in_two_tenants_owns_distinct_pin_slots() {
+        let store = ToolPinStore::new();
+        let fresh = definition_hashes(&list_body("acme catalog")).unwrap();
+        store
+            .pins
+            .lock()
+            .unwrap()
+            .insert("acme/bot".to_string(), fresh);
+        let pins = store.pins.lock().unwrap();
+        assert!(pins.contains_key("acme/bot"));
+        assert!(!pins.contains_key("globex/bot"));
     }
 
     #[test]

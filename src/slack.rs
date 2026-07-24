@@ -74,6 +74,7 @@ mod tests {
     fn sample_pending() -> Pending {
         Pending {
             correlation_id: "abc-123".to_string(),
+            tenant: "acme".to_string(),
             agent_id: "bearer-agent".to_string(),
             tool_type: "wire_transfer".to_string(),
             method: "call_tool".to_string(),

@@ -2069,7 +2069,7 @@ async fn rate_limit_gate_emits_429_with_json_body_and_ledger_row() {
     assert_eq!(r2.status().as_u16(), 429);
     let body: serde_json::Value = r2.json().await.unwrap();
     assert_eq!(body["error"], "rate_limited");
-    assert_eq!(body["agent_id"], "bearer-agent");
+    assert_eq!(body["agent_id"], "_legacy_unqualified/bearer-agent");
     let retry_after = body["retry_after_secs"].as_u64().unwrap();
     assert!(retry_after >= 1, "retry_after_secs must be >= 1");
     assert!(body["correlation_id"].is_string());
@@ -2077,7 +2077,10 @@ async fn rate_limit_gate_emits_429_with_json_body_and_ledger_row() {
     // The ledger should now carry a RateLimitDenied row keyed to the
     // same correlation_id the 429 body reported.
     let throttled_corr = body["correlation_id"].as_str().unwrap();
-    let rows = ledger.entries_for_agent("bearer-agent").await.unwrap();
+    let rows = ledger
+        .entries_for_agent("_legacy_unqualified/bearer-agent")
+        .await
+        .unwrap();
     let rl_row = rows
         .iter()
         .find(|r| r.correlation_id.as_deref() == Some(throttled_corr))

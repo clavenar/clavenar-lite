@@ -141,10 +141,14 @@ For real traffic, layer these on top of the default deploy:
 - **Ingress auth.** Set `CLAVENAR_LITE_TOKEN`; partners then send
   `Authorization: Bearer <token>` and unauthenticated requests get
   401. Without it the proxy accepts every connection.
-- **Multi-agent.** Set `CLAVENAR_LITE_AGENTS=agent-a:tok-a,agent-b:tok-b`
+- **Multi-agent.** Set
+  `CLAVENAR_LITE_AGENTS=acme/agent-a:tok-a,globex/agent-b:tok-b`
   to front N agents from one binary. Each token gets its own
-  `agent_id` on the ledger and in `input.agent_id` so Rego rules
-  can scope tool access per agent. Mutually exclusive with the
+  tenant-qualified state partition; the pending table retains separate
+  `tenant` and `agent_id` fields while rate, velocity, pin, and pending
+  access use the canonical `tenant/agent` identity. Bare `agent:token`
+  entries remain isolated in `_legacy_unqualified` for compatibility.
+  Mutually exclusive with the
   single-agent `CLAVENAR_LITE_TOKEN`; both being set picks the
   registry. Tokens must be unique across agents.
 - **Async-HIL webhooks.** Set
@@ -154,8 +158,9 @@ For real traffic, layer these on top of the default deploy:
   operator decide clavenar POSTs `{correlation_id, decision,
   decider_note, decided_at}` to that URL fire-and-forget. URLs
   outside the allowlist are rejected with 400. Unset (the default)
-  rejects callbacks entirely — partners poll
-  `GET /pending/{id}`.
+  rejects callbacks entirely — partners poll `GET /pending/{id}` with
+  the same bearer that created the pending. The lookup predicates the
+  correlation id, tenant, and agent id.
 - **Outbound verdict webhooks.** Set
   `CLAVENAR_LITE_WEBHOOK_URL=https://siem.example.com/ingest` to
   fire-and-forget a structured JSON event on every terminal

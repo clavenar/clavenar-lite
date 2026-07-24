@@ -313,9 +313,45 @@ impl ClavenarMode {
 /// single-agent default of `agent_id="bearer-agent"`; a multi-entry
 /// registry built from `CLAVENAR_LITE_AGENTS` gives each token its own
 /// `agent_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentIdentity {
+    pub tenant: String,
+    pub agent_id: String,
+}
+
+impl AgentIdentity {
+    fn new(tenant: &str, agent_id: &str) -> Result<Self, String> {
+        let valid = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 63
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        };
+        if !valid(tenant) {
+            return Err(format!(
+                "tenant {tenant:?} must match [A-Za-z0-9._-]{{1,63}}"
+            ));
+        }
+        if !valid(agent_id) {
+            return Err(format!(
+                "agent id {agent_id:?} must match [A-Za-z0-9._-]{{1,63}}"
+            ));
+        }
+        Ok(Self {
+            tenant: tenant.to_string(),
+            agent_id: agent_id.to_string(),
+        })
+    }
+
+    fn canonical_key(&self) -> String {
+        format!("{}/{}", self.tenant, self.agent_id)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentRegistry {
-    by_token: HashMap<String, String>,
+    by_token: HashMap<String, AgentIdentity>,
 }
 
 impl AgentRegistry {
@@ -324,7 +360,11 @@ impl AgentRegistry {
     /// is set — the lone token maps to `agent_id="bearer-agent"`.
     pub fn single(token: String) -> Self {
         let mut by_token = HashMap::new();
-        by_token.insert(token, "bearer-agent".to_string());
+        by_token.insert(
+            token,
+            AgentIdentity::new("_legacy_unqualified", "bearer-agent")
+                .expect("static compatibility identity is valid"),
+        );
         Self { by_token }
     }
 
@@ -333,7 +373,7 @@ impl AgentRegistry {
     /// be non-empty and may contain `[A-Za-z0-9_-]`. Duplicate tokens
     /// or malformed entries return `Err` so the binary exits at boot.
     pub fn parse(spec: &str) -> Result<Self, String> {
-        let mut by_token: HashMap<String, String> = HashMap::new();
+        let mut by_token: HashMap<String, AgentIdentity> = HashMap::new();
         for raw in spec.split(',') {
             let entry = raw.trim();
             if entry.is_empty() {
@@ -344,21 +384,18 @@ impl AgentRegistry {
                 .ok_or_else(|| format!("agent registry entry missing ':' separator: {entry:?}"))?;
             let id = id.trim();
             let token = token.trim();
-            if id.is_empty() {
-                return Err(format!("agent registry entry has empty id: {entry:?}"));
-            }
             if token.is_empty() {
                 return Err(format!("agent registry entry {id:?} has empty token"));
             }
-            if !id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-            {
-                return Err(format!("agent registry id {id:?} must match [A-Za-z0-9_-]"));
-            }
-            if let Some(existing) = by_token.insert(token.to_string(), id.to_string()) {
+            let identity = match id.split_once('/') {
+                Some((tenant, agent)) if !agent.contains('/') => AgentIdentity::new(tenant, agent)?,
+                Some(_) => return Err(format!("agent registry key {id:?} must be tenant/agent")),
+                None => AgentIdentity::new("_legacy_unqualified", id)?,
+            };
+            if let Some(existing) = by_token.insert(token.to_string(), identity) {
                 return Err(format!(
-                    "agent registry has duplicate token shared by {existing:?} and {id:?}"
+                    "agent registry has duplicate token shared by {:?} and {id:?}",
+                    existing.canonical_key()
                 ));
             }
         }
@@ -371,12 +408,12 @@ impl AgentRegistry {
     /// Lookup agent_id for a supplied bearer token. `None` means the
     /// token does not match any registered agent and the request
     /// should be rejected with 401.
-    pub fn lookup(&self, token: &str) -> Option<&str> {
+    pub fn lookup(&self, token: &str) -> Option<&AgentIdentity> {
         // Constant-time compare per-entry — the matching prefix length
         // does not leak via response timing.
-        for (registered_token, agent_id) in &self.by_token {
+        for (registered_token, identity) in &self.by_token {
             if constant_time_eq(token.as_bytes(), registered_token.as_bytes()) {
-                return Some(agent_id);
+                return Some(identity);
             }
         }
         None
@@ -396,8 +433,12 @@ impl AgentRegistry {
 
     /// Pretty-print the registered agent ids (not the tokens) for
     /// boot logging.
-    pub fn agent_ids(&self) -> Vec<&str> {
-        let mut ids: Vec<&str> = self.by_token.values().map(String::as_str).collect();
+    pub fn agent_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .by_token
+            .values()
+            .map(AgentIdentity::canonical_key)
+            .collect();
         ids.sort_unstable();
         ids
     }
@@ -646,6 +687,7 @@ struct PendingView {
     status: &'static str,
     pending_id: String,
     correlation_id: String,
+    tenant: String,
     agent_id: String,
     tool_type: String,
     method: String,
@@ -669,6 +711,7 @@ impl From<Pending> for PendingView {
             status,
             pending_id: p.correlation_id.clone(),
             correlation_id: p.correlation_id,
+            tenant: p.tenant,
             agent_id: p.agent_id,
             tool_type: p.tool_type,
             method: p.method,
@@ -796,29 +839,33 @@ async fn handle_get_pending(
 ) -> Response {
     let poll_corr = Uuid::new_v4().to_string();
 
-    // Reuse the agent registry for poll auth. Polling is a strictly
-    // read-only capability the SDK needs after parking a tool call,
-    // so the same identity that issued the `/mcp` call is the natural
-    // caller — any registered agent's bearer can read any correlation
-    // id. Lite does not scope polls per-correlation-id; for
-    // production per-agent isolation, ship to the full edition.
-    if let Some(registry) = &state.agents {
+    // Reuse the agent registry for poll auth and carry its exact
+    // tenant/agent identity into the SQLite predicate. A correlation id
+    // is not authority to read another tenant's pending.
+    let poll_identity = if let Some(registry) = &state.agents {
         let supplied = headers
             .get("authorization")
             .and_then(|h| h.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "));
-        let ok = supplied.is_some_and(|s| registry.lookup(s).is_some());
-        if !ok {
+        let Some(identity) = supplied.and_then(|s| registry.lookup(s)).cloned() else {
             return (
                 StatusCode::UNAUTHORIZED,
                 clavenar_headers(&poll_corr, state.mode, false, false),
                 "missing or invalid bearer token",
             )
                 .into_response();
-        }
-    }
+        };
+        identity
+    } else {
+        AgentIdentity::new("_legacy_unqualified", "anonymous")
+            .expect("static anonymous identity is valid")
+    };
 
-    match state.ledger.get_pending(&id).await {
+    match state
+        .ledger
+        .get_pending_for_agent(&id, &poll_identity.tenant, &poll_identity.agent_id)
+        .await
+    {
         Ok(Some(p)) => (
             StatusCode::OK,
             clavenar_headers(&poll_corr, state.mode, false, false),
@@ -1225,7 +1272,7 @@ async fn handle_mcp(
     // matching-prefix length does not leak via response timing. In a
     // multi-agent registry, the matched token also yields the
     // `agent_id` we tag the request with.
-    let agent_id: String = match &state.agents {
+    let agent_identity = match &state.agents {
         Some(registry) => {
             let supplied = headers
                 .get("authorization")
@@ -1233,7 +1280,7 @@ async fn handle_mcp(
                 .and_then(|s| s.strip_prefix("Bearer "));
             let matched = supplied.and_then(|s| registry.lookup(s));
             match matched {
-                Some(id) => id.to_string(),
+                Some(identity) => identity.clone(),
                 None => {
                     return (
                         StatusCode::UNAUTHORIZED,
@@ -1244,8 +1291,11 @@ async fn handle_mcp(
                 }
             }
         }
-        None => "anonymous".to_string(),
+        None => AgentIdentity::new("_legacy_unqualified", "anonymous")
+            .expect("static anonymous identity is valid"),
     };
+    let agent_id = agent_identity.agent_id.clone();
+    let agent_key = agent_identity.canonical_key();
 
     if server_execution.is_some() && state.agents.is_none() {
         return server_execution_error(
@@ -1266,7 +1316,7 @@ async fn handle_mcp(
         && let RateLimitOutcome::Denied {
             agent_id: throttled,
             retry_after_secs,
-        } = limiter.check(&agent_id)
+        } = limiter.check(&agent_key)
     {
         metrics::counter!("clavenar_lite_rate_limit_denied_total").increment(1);
         tracing::warn!(
@@ -1340,7 +1390,14 @@ async fn handle_mcp(
     // is what lets an evaluator add Clavenar as a standard MCP server.
     // `tools/list` responses additionally feed the supply-chain pin.
     if is_mcp_control_method(&parsed.method) {
-        return forward_control(&state, &agent_id, &correlation_id, &parsed.method, body).await;
+        return forward_control(
+            &state,
+            &agent_identity,
+            &correlation_id,
+            &parsed.method,
+            body,
+        )
+        .await;
     }
 
     // `tool_type` is `params.name` when this is a tool call; otherwise
@@ -1425,7 +1482,9 @@ async fn handle_mcp(
         agent_history: AgentHistory::default(),
         intent_score: brain.intent_score,
         current_time: None,
-        agent_id: Some(agent_id.clone()),
+        // Embedded velocity state uses the tenant-qualified identity;
+        // the ledger below keeps the separate human-facing agent id.
+        agent_id: Some(agent_key.clone()),
         method: Some(parsed.method.clone()),
         recent_request_count: 0,
         correlation_id: Some(correlation_id.clone()),
@@ -1517,6 +1576,7 @@ async fn handle_mcp(
             // endpoint) to learn the outcome.
             let park = ParkRequest {
                 correlation_id: correlation_id.clone(),
+                tenant: agent_identity.tenant.clone(),
                 agent_id: agent_id.clone(),
                 tool_type: tool_type.clone(),
                 method: parsed.method.clone(),
@@ -1869,7 +1929,7 @@ fn is_mcp_control_method(method: &str) -> bool {
 /// list) is detectable.
 async fn forward_control(
     state: &AppState,
-    agent_id: &str,
+    agent_identity: &AgentIdentity,
     correlation_id: &str,
     method: &str,
     body: Bytes,
@@ -1906,7 +1966,13 @@ async fn forward_control(
         }
     };
     if method == "tools/list" {
-        crate::supply_chain::observe_tools_list(state, agent_id, &upstream_body).await;
+        crate::supply_chain::observe_tools_list(
+            state,
+            &agent_identity.canonical_key(),
+            &agent_identity.agent_id,
+            &upstream_body,
+        )
+        .await;
     }
     let out_status =
         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -2060,16 +2126,25 @@ mod tests {
     fn agent_registry_single_round_trips() {
         let r = AgentRegistry::single("tok-x".to_string());
         assert_eq!(r.len(), 1);
-        assert_eq!(r.lookup("tok-x"), Some("bearer-agent"));
+        assert_eq!(
+            r.lookup("tok-x").map(AgentIdentity::canonical_key),
+            Some("_legacy_unqualified/bearer-agent".to_string())
+        );
         assert_eq!(r.lookup("tok-y"), None);
     }
 
     #[test]
     fn agent_registry_parses_multi() {
-        let r = AgentRegistry::parse("agent-a:tok-a, agent-b:tok-b").unwrap();
+        let r = AgentRegistry::parse("acme/bot:tok-a, globex/bot:tok-b").unwrap();
         assert_eq!(r.len(), 2);
-        assert_eq!(r.lookup("tok-a"), Some("agent-a"));
-        assert_eq!(r.lookup("tok-b"), Some("agent-b"));
+        assert_eq!(
+            r.lookup("tok-a").map(AgentIdentity::canonical_key),
+            Some("acme/bot".to_string())
+        );
+        assert_eq!(
+            r.lookup("tok-b").map(AgentIdentity::canonical_key),
+            Some("globex/bot".to_string())
+        );
         assert_eq!(r.lookup("tok-c"), None);
     }
 
@@ -2093,8 +2168,8 @@ mod tests {
 
     #[test]
     fn agent_registry_rejects_bad_id_chars() {
-        let err = AgentRegistry::parse("agent.with.dots:tok").unwrap_err();
-        assert!(err.contains("[A-Za-z0-9_-]"));
+        let err = AgentRegistry::parse("tenant/agent/extra:tok").unwrap_err();
+        assert!(err.contains("tenant/agent"));
     }
 
     #[test]

@@ -352,6 +352,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn velocity_isolates_same_agent_name_between_tenants() {
+        let tracker = VelocityTracker::new(60);
+        assert_eq!(tracker.record_and_count("acme/bot").await, 1);
+        assert_eq!(tracker.record_and_count("acme/bot").await, 2);
+        assert_eq!(tracker.record_and_count("globex/bot").await, 1);
+    }
+
+    #[tokio::test]
     async fn velocity_tracker_drops_stale_agent_keys() {
         // A one-shot agent must not occupy a HashMap slot forever after
         // its window passes — left unevicted, the map grows unbounded
