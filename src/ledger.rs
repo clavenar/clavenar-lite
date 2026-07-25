@@ -771,6 +771,31 @@ impl Ledger {
         decision: &str,
         note: Option<&str>,
     ) -> Result<Pending, DecideError> {
+        self.decide_pending_scoped(correlation_id, None, decision, note)
+            .await
+    }
+
+    /// Record a decision only when the target belongs to `tenant`. Unknown
+    /// and cross-tenant correlation ids both return `NotFound`, so the route
+    /// cannot be used as an existence oracle.
+    pub async fn decide_pending_for_tenant(
+        &self,
+        correlation_id: &str,
+        tenant: &str,
+        decision: &str,
+        note: Option<&str>,
+    ) -> Result<Pending, DecideError> {
+        self.decide_pending_scoped(correlation_id, Some(tenant), decision, note)
+            .await
+    }
+
+    async fn decide_pending_scoped(
+        &self,
+        correlation_id: &str,
+        tenant: Option<&str>,
+        decision: &str,
+        note: Option<&str>,
+    ) -> Result<Pending, DecideError> {
         if decision != "allow" && decision != "deny" {
             return Err(DecideError::InvalidDecision(decision.to_string()));
         }
@@ -783,9 +808,10 @@ impl Ledger {
             let mut stmt = conn.prepare(
                 "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
                         requested_at, decided_at, decision, decider_note, callback_url, tenant
-                 FROM pendings WHERE correlation_id = ?1",
+                 FROM pendings
+                 WHERE correlation_id = ?1 AND (?2 IS NULL OR tenant = ?2)",
             )?;
-            let mut rows = stmt.query([correlation_id])?;
+            let mut rows = stmt.query(rusqlite::params![correlation_id, tenant])?;
             match rows.next()? {
                 Some(row) => row_to_pending(row)?,
                 None => return Err(DecideError::NotFound),
@@ -798,8 +824,15 @@ impl Ledger {
         let decided_at = Utc::now();
         let rows_affected = conn.execute(
             "UPDATE pendings SET decided_at = ?1, decision = ?2, decider_note = ?3
-             WHERE correlation_id = ?4 AND decided_at IS NULL",
-            rusqlite::params![decided_at.to_rfc3339(), decision, note, correlation_id,],
+             WHERE correlation_id = ?4 AND decided_at IS NULL
+               AND (?5 IS NULL OR tenant = ?5)",
+            rusqlite::params![
+                decided_at.to_rfc3339(),
+                decision,
+                note,
+                correlation_id,
+                tenant,
+            ],
         )?;
         if rows_affected == 0 {
             // Belt-and-suspenders: under the connection mutex this
@@ -846,6 +879,36 @@ impl Ledger {
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([limit], row_to_pending)?;
+        rows.collect()
+    }
+
+    /// List only rows belonging to the authenticated operator tenant.
+    pub async fn list_pendings_for_tenant(
+        &self,
+        filter: PendingFilter,
+        limit: u32,
+        sort: PendingSort,
+        tenant: &str,
+    ) -> rusqlite::Result<Vec<Pending>> {
+        let conn = self.conn.lock().await;
+        let decision_predicate = match filter {
+            PendingFilter::Parked => "AND decided_at IS NULL",
+            PendingFilter::Decided => "AND decided_at IS NOT NULL",
+            PendingFilter::All => "",
+        };
+        let order_dir = match sort {
+            PendingSort::Oldest => "ASC",
+            PendingSort::Newest => "DESC",
+        };
+        let sql = format!(
+            "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
+                    requested_at, decided_at, decision, decider_note, callback_url, tenant
+             FROM pendings
+             WHERE tenant = ?1 {decision_predicate}
+             ORDER BY requested_at {order_dir} LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![tenant, limit], row_to_pending)?;
         rows.collect()
     }
 
@@ -1572,6 +1635,53 @@ mod tests {
                 .tenant,
             "acme"
         );
+    }
+
+    #[tokio::test]
+    async fn operator_routes_are_tenant_scoped_before_read_or_mutation() {
+        let ledger = Ledger::open(":memory:").unwrap();
+        for (tenant, correlation_id) in [("acme", "op-acme"), ("globex", "op-globex")] {
+            ledger
+                .park_pending(ParkRequest {
+                    correlation_id: correlation_id.to_string(),
+                    tenant: tenant.to_string(),
+                    agent_id: "bot".to_string(),
+                    tool_type: "wire_transfer".to_string(),
+                    method: "call_tool".to_string(),
+                    review_reasons: vec!["review".to_string()],
+                    callback_url: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let acme = ledger
+            .list_pendings_for_tenant(PendingFilter::All, 50, PendingSort::Oldest, "acme")
+            .await
+            .unwrap();
+        assert_eq!(acme.len(), 1);
+        assert_eq!(acme[0].correlation_id, "op-acme");
+
+        assert!(matches!(
+            ledger
+                .decide_pending_for_tenant("op-globex", "acme", "allow", None)
+                .await,
+            Err(DecideError::NotFound)
+        ));
+        assert!(
+            ledger
+                .get_pending("op-globex")
+                .await
+                .unwrap()
+                .unwrap()
+                .decision
+                .is_none(),
+            "cross-tenant denial must not mutate the target row"
+        );
+        ledger
+            .decide_pending_for_tenant("op-acme", "acme", "allow", None)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

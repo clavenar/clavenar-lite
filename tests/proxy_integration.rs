@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::{Router, extract::State, routing::post};
-use clavenar_lite::ledger::Ledger;
+use clavenar_lite::ledger::{Ledger, ParkRequest};
 use clavenar_lite::policy::PolicyEngine;
-use clavenar_lite::proxy::{AgentRegistry, AppState, ClavenarMode, build_router};
+use clavenar_lite::proxy::{AgentRegistry, AppState, ClavenarMode, TenantRegistry, build_router};
 
 trait DecisionRequestExt {
     fn decision_post<U: reqwest::IntoUrl>(&self, url: U) -> reqwest::RequestBuilder;
@@ -303,6 +303,7 @@ async fn spawn_lite_with_slack(
         upstream_url,
         http: reqwest::Client::new(),
         agents,
+        deciders: None,
         decide_token,
         upstream_api_key: None,
         mode,
@@ -335,6 +336,7 @@ async fn spawn_lite_verbose(upstream_url: String) -> (SocketAddr, Arc<Ledger>) {
         upstream_url,
         http: reqwest::Client::new(),
         agents: None,
+        deciders: None,
         decide_token: None,
         upstream_api_key: None,
         mode: ClavenarMode::Enforce,
@@ -1417,6 +1419,100 @@ async fn list_pendings_requires_decide_token_when_configured() {
 }
 
 #[tokio::test]
+async fn tenant_tokens_confine_lite_list_poll_and_decide_routes() {
+    let upstream = spawn_stub_upstream().await;
+    let policy = Arc::new(PolicyEngine::from_dir(&policies_dir(), 60).unwrap());
+    let ledger = Arc::new(Ledger::open(":memory:").unwrap());
+    for (tenant, correlation_id) in [("acme", "row-acme"), ("globex", "row-globex")] {
+        ledger
+            .park_pending(ParkRequest {
+                correlation_id: correlation_id.to_string(),
+                tenant: tenant.to_string(),
+                agent_id: "bot".to_string(),
+                tool_type: "wire_transfer".to_string(),
+                method: "call_tool".to_string(),
+                review_reasons: vec!["review".to_string()],
+                callback_url: None,
+            })
+            .await
+            .unwrap();
+    }
+    let state = Arc::new(AppState {
+        policy,
+        ledger: ledger.clone(),
+        tool_pins: Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
+        upstream_url: format!("http://{upstream}/mcp"),
+        http: reqwest::Client::new(),
+        agents: Some(AgentRegistry::parse("acme/bot:agent-a,globex/bot:agent-b").unwrap()),
+        deciders: Some(TenantRegistry::parse("acme:operator-a,globex:operator-b").unwrap()),
+        decide_token: Some("forged-legacy".to_string()),
+        upstream_api_key: None,
+        mode: ClavenarMode::Enforce,
+        slack_webhook_url: None,
+        callback_allowlist: Vec::new(),
+        webhook_url: None,
+        rate_limiter: None,
+        verbose_verdicts: false,
+    });
+    let app = build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let lite_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let listed = client
+        .get(format!("http://{lite_addr}/pending?status=all"))
+        .bearer_auth("operator-a")
+        .header("x-clavenar-tenant", "globex")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status().as_u16(), 200);
+    let rows: Vec<serde_json::Value> = listed.json().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["correlation_id"], "row-acme");
+
+    for id in ["row-globex", "unknown-row"] {
+        let response = client
+            .get(format!("http://{lite_addr}/pending/{id}"))
+            .bearer_auth("agent-a")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 404);
+    }
+
+    let denied = client
+        .decision_post(format!("http://{lite_addr}/pending/row-globex/decide"))
+        .bearer_auth("operator-a")
+        .json(&serde_json::json!({"decision": "allow"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status().as_u16(), 404);
+    assert!(
+        ledger
+            .get_pending("row-globex")
+            .await
+            .unwrap()
+            .unwrap()
+            .decision
+            .is_none()
+    );
+
+    let allowed = client
+        .decision_post(format!("http://{lite_addr}/pending/row-acme/decide"))
+        .bearer_auth("operator-a")
+        .json(&serde_json::json!({"decision": "allow"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(allowed.status().as_u16(), 200);
+}
+
+#[tokio::test]
 async fn list_pendings_caps_limit_at_500() {
     let upstream = spawn_stub_upstream().await;
     let (lite_addr, _ledger) = spawn_lite(format!("http://{}/mcp", upstream), None).await;
@@ -1555,6 +1651,7 @@ async fn spawn_lite_with_registry(
         upstream_url,
         http: reqwest::Client::new(),
         agents: Some(registry),
+        deciders: None,
         decide_token: None,
         upstream_api_key: None,
         mode: ClavenarMode::Enforce,
@@ -1576,7 +1673,7 @@ async fn spawn_lite_with_registry(
 #[tokio::test]
 async fn multi_agent_routes_each_token_to_its_own_agent_id() {
     let upstream = spawn_stub_upstream().await;
-    let registry = AgentRegistry::parse("agent-a:tok-a,agent-b:tok-b").unwrap();
+    let registry = AgentRegistry::parse("acme/agent-a:tok-a,globex/agent-b:tok-b").unwrap();
     let (lite_addr, ledger) =
         spawn_lite_with_registry(format!("http://{}/mcp", upstream), registry).await;
 
@@ -1617,7 +1714,7 @@ async fn multi_agent_routes_each_token_to_its_own_agent_id() {
 #[tokio::test]
 async fn multi_agent_rejects_unknown_token() {
     let upstream = spawn_stub_upstream().await;
-    let registry = AgentRegistry::parse("agent-a:tok-a").unwrap();
+    let registry = AgentRegistry::parse("acme/agent-a:tok-a").unwrap();
     let (lite_addr, ledger) =
         spawn_lite_with_registry(format!("http://{}/mcp", upstream), registry).await;
 
@@ -1654,6 +1751,7 @@ async fn spawn_lite_with_callbacks(
         upstream_url,
         http: reqwest::Client::new(),
         agents: None,
+        deciders: None,
         decide_token: None,
         upstream_api_key: None,
         mode: ClavenarMode::Enforce,
@@ -1816,6 +1914,7 @@ async fn spawn_lite_with_webhook(
         upstream_url,
         http: reqwest::Client::new(),
         agents: Some(AgentRegistry::single("test-token".to_string())),
+        deciders: None,
         decide_token: None,
         upstream_api_key: None,
         mode,
@@ -2031,6 +2130,7 @@ async fn rate_limit_gate_emits_429_with_json_body_and_ledger_row() {
         upstream_url: format!("http://{}/mcp", upstream),
         http: reqwest::Client::new(),
         agents,
+        deciders: None,
         decide_token: None,
         upstream_api_key: None,
         mode: ClavenarMode::Enforce,

@@ -368,7 +368,7 @@ impl AgentRegistry {
         Self { by_token }
     }
 
-    /// Build a multi-agent registry from the `id:token,id:token` form
+    /// Build a multi-agent registry from the `tenant/id:token,...` form
     /// of `CLAVENAR_LITE_AGENTS`. Tokens must be unique; agent ids must
     /// be non-empty and may contain `[A-Za-z0-9_-]`. Duplicate tokens
     /// or malformed entries return `Err` so the binary exits at boot.
@@ -390,7 +390,11 @@ impl AgentRegistry {
             let identity = match id.split_once('/') {
                 Some((tenant, agent)) if !agent.contains('/') => AgentIdentity::new(tenant, agent)?,
                 Some(_) => return Err(format!("agent registry key {id:?} must be tenant/agent")),
-                None => AgentIdentity::new("_legacy_unqualified", id)?,
+                None => {
+                    return Err(format!(
+                        "agent registry key {id:?} must be tenant/agent; use --token for explicit single-user compatibility"
+                    ));
+                }
             };
             if let Some(existing) = by_token.insert(token.to_string(), identity) {
                 return Err(format!(
@@ -444,6 +448,58 @@ impl AgentRegistry {
     }
 }
 
+/// Tenant-bearing operator bearer registry for queue discovery and decisions.
+#[derive(Debug, Clone)]
+pub struct TenantRegistry {
+    by_token: HashMap<String, String>,
+}
+
+impl TenantRegistry {
+    /// Parse comma-separated `tenant:token` entries. Tenant labels and tokens
+    /// must be non-empty, and a token may authorize exactly one tenant.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let mut by_token = HashMap::new();
+        for raw in spec.split(',') {
+            let entry = raw.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let (tenant, token) = entry.split_once(':').ok_or_else(|| {
+                format!("decider registry entry missing ':' separator: {entry:?}")
+            })?;
+            let tenant = tenant.trim();
+            let token = token.trim();
+            AgentIdentity::new(tenant, "operator")?;
+            if token.is_empty() {
+                return Err(format!("decider registry entry {tenant:?} has empty token"));
+            }
+            if let Some(existing) = by_token.insert(token.to_string(), tenant.to_string()) {
+                return Err(format!(
+                    "decider registry has duplicate token shared by {existing:?} and {tenant:?}"
+                ));
+            }
+        }
+        if by_token.is_empty() {
+            return Err("decider registry is empty (no tenant:token pairs parsed)".to_string());
+        }
+        Ok(Self { by_token })
+    }
+
+    pub fn lookup(&self, token: &str) -> Option<&str> {
+        self.by_token.iter().find_map(|(registered, tenant)| {
+            constant_time_eq(token.as_bytes(), registered.as_bytes()).then_some(tenant.as_str())
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_token.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_token.is_empty()
+    }
+}
+
 /// Shared state behind an `Arc`. Cloned per-request via `State<Arc<...>>`.
 pub struct AppState {
     pub policy: Arc<PolicyEngine>,
@@ -458,6 +514,9 @@ pub struct AppState {
     /// preserves the v0.x `bearer-agent` behavior; a multi-entry
     /// registry gives each token a distinct `agent_id`.
     pub agents: Option<AgentRegistry>,
+    /// Tenant-bearing operator registry. When configured, queue list and
+    /// decision routes derive their tenant exclusively from the bearer token.
+    pub deciders: Option<TenantRegistry>,
     /// Optional bearer token gating `POST /pending/{id}/decide`. Held
     /// separately from `bearer_token` because the agent identity that
     /// drives `/mcp` is a strictly weaker capability than the operator
@@ -745,6 +804,32 @@ struct ListPendingParams {
 const LIST_PENDING_DEFAULT_LIMIT: u32 = 50;
 const LIST_PENDING_MAX_LIMIT: u32 = 500;
 
+fn resolve_operator_tenant(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<String>, &'static str> {
+    let supplied = headers
+        .get("authorization")
+        .and_then(|header| header.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+
+    if let Some(registry) = &state.deciders {
+        return supplied
+            .and_then(|token| registry.lookup(token))
+            .map(|tenant| Some(tenant.to_string()))
+            .ok_or("missing or invalid tenant-bearing operator token");
+    }
+
+    if let Some(expected) = &state.decide_token {
+        if supplied.is_some_and(|token| constant_time_eq(token.as_bytes(), expected.as_bytes())) {
+            return Ok(Some("_legacy_unqualified".to_string()));
+        }
+        return Err("missing or invalid decide token");
+    }
+
+    Ok(None)
+}
+
 async fn handle_list_pendings(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListPendingParams>,
@@ -754,24 +839,17 @@ async fn handle_list_pendings(
     // `decide`. Auth is required if `--decide-token` was set at boot;
     // otherwise the endpoint is open (single-user developer mode).
     let corr = Uuid::new_v4().to_string();
-    if let Some(expected) = &state.decide_token {
-        let supplied = headers
-            .get("authorization")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
-        let ok = match supplied {
-            Some(s) => constant_time_eq(s.as_bytes(), expected.as_bytes()),
-            None => false,
-        };
-        if !ok {
+    let operator_tenant = match resolve_operator_tenant(&state, &headers) {
+        Ok(tenant) => tenant,
+        Err(message) => {
             return (
                 StatusCode::UNAUTHORIZED,
                 clavenar_headers(&corr, state.mode, false, false),
-                "missing or invalid decide token",
+                message,
             )
                 .into_response();
         }
-    }
+    };
 
     let filter = match params.status.as_deref() {
         None | Some("parked") => PendingFilter::Parked,
@@ -810,7 +888,16 @@ async fn handle_list_pendings(
         .unwrap_or(LIST_PENDING_DEFAULT_LIMIT)
         .min(LIST_PENDING_MAX_LIMIT);
 
-    match state.ledger.list_pendings(filter, limit, sort).await {
+    let rows = match operator_tenant.as_deref() {
+        Some(tenant) => {
+            state
+                .ledger
+                .list_pendings_for_tenant(filter, limit, sort, tenant)
+                .await
+        }
+        None => state.ledger.list_pendings(filter, limit, sort).await,
+    };
+    match rows {
         Ok(rows) => {
             let views: Vec<PendingView> = rows.into_iter().map(PendingView::from).collect();
             (
@@ -903,24 +990,17 @@ async fn handle_decide_pending(
     // pending's `id` here because the access-log line tracks the
     // decide HTTP call, not the original tool call.
     let decide_corr = Uuid::new_v4().to_string();
-    if let Some(expected) = &state.decide_token {
-        let supplied = headers
-            .get("authorization")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
-        let ok = match supplied {
-            Some(s) => constant_time_eq(s.as_bytes(), expected.as_bytes()),
-            None => false,
-        };
-        if !ok {
+    let operator_tenant = match resolve_operator_tenant(&state, &headers) {
+        Ok(tenant) => tenant,
+        Err(message) => {
             return (
                 StatusCode::UNAUTHORIZED,
                 clavenar_headers(&decide_corr, state.mode, false, false),
-                "missing or invalid decide token",
+                message,
             )
                 .into_response();
         }
-    }
+    };
 
     let req: DecideRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -934,11 +1014,21 @@ async fn handle_decide_pending(
         }
     };
 
-    let decided = match state
-        .ledger
-        .decide_pending(&id, &req.decision, req.note.as_deref())
-        .await
-    {
+    let decision = match operator_tenant.as_deref() {
+        Some(tenant) => {
+            state
+                .ledger
+                .decide_pending_for_tenant(&id, tenant, &req.decision, req.note.as_deref())
+                .await
+        }
+        None => {
+            state
+                .ledger
+                .decide_pending(&id, &req.decision, req.note.as_deref())
+                .await
+        }
+    };
+    let decided = match decision {
         Ok(p) => p,
         Err(DecideError::NotFound) => {
             return (
@@ -2150,7 +2240,7 @@ mod tests {
 
     #[test]
     fn agent_registry_rejects_duplicate_tokens() {
-        let err = AgentRegistry::parse("agent-a:tok-x,agent-b:tok-x").unwrap_err();
+        let err = AgentRegistry::parse("acme/agent-a:tok-x,globex/agent-b:tok-x").unwrap_err();
         assert!(err.contains("duplicate token"));
     }
 
@@ -2163,7 +2253,7 @@ mod tests {
     #[test]
     fn agent_registry_rejects_empty_id_or_token() {
         assert!(AgentRegistry::parse(":tok").is_err());
-        assert!(AgentRegistry::parse("agent:").is_err());
+        assert!(AgentRegistry::parse("acme/agent:").is_err());
     }
 
     #[test]
@@ -2176,6 +2266,28 @@ mod tests {
     fn agent_registry_rejects_empty_spec() {
         assert!(AgentRegistry::parse("").is_err());
         assert!(AgentRegistry::parse("   , ,").is_err());
+    }
+
+    #[test]
+    fn agent_registry_rejects_unqualified_multi_agent_entries() {
+        let error = AgentRegistry::parse("bot:token").unwrap_err();
+        assert!(error.contains("must be tenant/agent"));
+    }
+
+    #[test]
+    fn tenant_registry_binds_tokens_to_exact_tenants() {
+        let registry = TenantRegistry::parse("acme:op-a,globex:op-b").unwrap();
+        assert_eq!(registry.lookup("op-a"), Some("acme"));
+        assert_eq!(registry.lookup("op-b"), Some("globex"));
+        assert_eq!(registry.lookup("op-c"), None);
+    }
+
+    #[test]
+    fn tenant_registry_rejects_unsafe_or_ambiguous_entries() {
+        assert!(TenantRegistry::parse("bad/tenant:op").is_err());
+        assert!(TenantRegistry::parse("acme:").is_err());
+        assert!(TenantRegistry::parse("acme:op,globex:op").is_err());
+        assert!(TenantRegistry::parse("").is_err());
     }
 
     #[tokio::test]
@@ -2192,6 +2304,7 @@ mod tests {
             upstream_url: "http://127.0.0.1:0/never-called".into(),
             http: reqwest::Client::new(),
             agents: None,
+            deciders: None,
             decide_token: None,
             upstream_api_key: None,
             mode: ClavenarMode::Enforce,

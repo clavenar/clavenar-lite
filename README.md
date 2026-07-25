@@ -147,10 +147,16 @@ For real traffic, layer these on top of the default deploy:
   tenant-qualified state partition; the pending table retains separate
   `tenant` and `agent_id` fields while rate, velocity, pin, and pending
   access use the canonical `tenant/agent` identity. Bare `agent:token`
-  entries remain isolated in `_legacy_unqualified` for compatibility.
-  Mutually exclusive with the
+  entries are rejected; use the explicit single-user `CLAVENAR_LITE_TOKEN`
+  compatibility path when no tenant registry exists. Mutually exclusive with the
   single-agent `CLAVENAR_LITE_TOKEN`; both being set picks the
   registry. Tokens must be unique across agents.
+- **Multi-operator.** Set
+  `CLAVENAR_LITE_DECIDERS=acme:op-a,globex:op-b`. Pending list and
+  decision routes derive the tenant from the matched token, return only
+  that tenant's rows, and make foreign identifiers indistinguishable from
+  unknown ones. This registry takes precedence over the explicit
+  single-user `CLAVENAR_LITE_DECIDE_TOKEN` compatibility path.
 - **Async-HIL webhooks.** Set
   `CLAVENAR_LITE_CALLBACK_ALLOWLIST=https://my-app.example.com/`
   (comma-separated prefixes) to enable agent-supplied callback
@@ -184,7 +190,7 @@ For real traffic, layer these on top of the default deploy:
 ```
 clavenar-lite start [--port N] [--upstream URL] [--policies DIR] [--ledger PATH]
                   [--velocity-window SECS] [--token TOKEN] [--agents SPEC]
-                  [--decide-token TOKEN] [--upstream-api-key KEY]
+                  [--decide-token TOKEN] [--deciders SPEC] [--upstream-api-key KEY]
                   [--upstream-timeout-secs SECS] [--slack-webhook-url URL]
                   [--callback-allowlist PREFIXES] [--webhook-url URL]
 clavenar-lite verify [--ledger PATH]
@@ -223,6 +229,7 @@ Every flag falls back to a `CLAVENAR_LITE_*` env var:
 | `--upstream-timeout-secs`  | `CLAVENAR_LITE_UPSTREAM_TIMEOUT_SECS`  | 120                       |
 | `--mode`                   | `CLAVENAR_LITE_MODE`                   | `enforce`                 |
 | `--decide-token`           | `CLAVENAR_LITE_DECIDE_TOKEN`           | (none — open access)      |
+| `--deciders`               | `CLAVENAR_LITE_DECIDERS`               | (none — single-operator)  |
 | `--slack-webhook-url`      | `CLAVENAR_LITE_SLACK_WEBHOOK_URL`      | (none — alerts off)       |
 | `--webhook-url`            | `CLAVENAR_LITE_WEBHOOK_URL`            | (none — webhook off)      |
 | `--rate-limit-qps`         | `CLAVENAR_LITE_RATE_LIMIT_QPS`         | 0 (rate limit off)        |
@@ -460,8 +467,8 @@ canonical example), clavenar-lite parks the request:
    second ledger row (`PendingApproved` / `PendingDenied`) and flips
    the pendings row. Idempotent in the failure direction: a second
    decide returns `409`, never silently overwriting. Auth: separate
-   `--decide-token` so agent bearers cannot approve their own
-   pendings.
+   `--deciders tenant:token` so agent bearers cannot approve their own
+   pendings and an operator cannot list or decide another tenant's rows.
 
 ```bash
 # Park a wire transfer (in another terminal, agent-side):

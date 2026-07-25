@@ -14,7 +14,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use clavenar_lite::ledger::Ledger;
 use clavenar_lite::policy::PolicyEngine;
-use clavenar_lite::proxy::{AgentRegistry, AppState, ClavenarMode, build_router};
+use clavenar_lite::proxy::{AgentRegistry, AppState, ClavenarMode, TenantRegistry, build_router};
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 use std::io::IsTerminal;
@@ -40,6 +40,10 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "clap requires the start option fields inline to preserve the public CLI shape"
+)]
 enum Command {
     /// Run the clavenar-lite proxy server.
     Start {
@@ -74,10 +78,10 @@ enum Command {
         #[arg(long, env = "CLAVENAR_LITE_TOKEN")]
         token: Option<String>,
 
-        /// Multi-agent registry. Comma-separated `id:token` pairs;
+        /// Multi-agent registry. Comma-separated `tenant/id:token` pairs;
         /// each token gets its own `agent_id` on the ledger and in
         /// policy input. e.g.
-        /// `--agents agent-a:tok-a,agent-b:tok-b`. Env
+        /// `--agents acme/agent-a:tok-a,globex/agent-b:tok-b`. Env
         /// `CLAVENAR_LITE_AGENTS`. Mutually exclusive with `--token`.
         #[arg(long, env = "CLAVENAR_LITE_AGENTS")]
         agents: Option<String>,
@@ -90,6 +94,14 @@ enum Command {
         /// pendings. Env `CLAVENAR_LITE_DECIDE_TOKEN`.
         #[arg(long, env = "CLAVENAR_LITE_DECIDE_TOKEN")]
         decide_token: Option<String>,
+
+        /// Tenant-bearing operator registry. Comma-separated
+        /// `tenant:token` entries. List and decision routes derive their
+        /// tenant exclusively from the matched token. Takes precedence over
+        /// the legacy single-user `--decide-token` form.
+        /// Env `CLAVENAR_LITE_DECIDERS`.
+        #[arg(long, env = "CLAVENAR_LITE_DECIDERS")]
+        deciders: Option<String>,
 
         /// Optional API key forwarded to the upstream as
         /// `Authorization: Bearer <key>`. Use this for OpenAI /
@@ -395,6 +407,7 @@ async fn main() {
             token,
             agents,
             decide_token,
+            deciders,
             upstream_api_key,
             upstream_timeout_secs,
             mode,
@@ -429,6 +442,7 @@ async fn main() {
                 token,
                 agents,
                 decide_token,
+                deciders,
                 upstream_api_key,
                 upstream_timeout,
                 mode,
@@ -716,6 +730,7 @@ struct StartConfig {
     token: Option<String>,
     agents: Option<String>,
     decide_token: Option<String>,
+    deciders: Option<String>,
     upstream_api_key: Option<String>,
     upstream_timeout: Duration,
     mode: ClavenarMode,
@@ -795,6 +810,23 @@ async fn run_start(cfg: StartConfig) -> i32 {
         (None, None) => None,
     };
 
+    let deciders = match cfg.deciders.as_deref() {
+        Some(spec) => match TenantRegistry::parse(spec) {
+            Ok(registry) => {
+                tracing::info!(
+                    tenant_count = registry.len(),
+                    "tenant-bearing operator registry loaded"
+                );
+                Some(registry)
+            }
+            Err(error) => {
+                eprintln!("error: failed to parse --deciders: {error}");
+                return 1;
+            }
+        },
+        None => None,
+    };
+
     // Async-HIL callback allowlist. Empty list means callback URLs
     // are rejected at /mcp time — partners poll. We parse here so a
     // bad config fails boot rather than at first /mcp.
@@ -865,6 +897,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
         upstream_url: cfg.upstream.clone(),
         http,
         agents,
+        deciders,
         decide_token: cfg.decide_token.clone(),
         upstream_api_key: cfg.upstream_api_key,
         mode: cfg.mode,
@@ -957,8 +990,10 @@ async fn run_start(cfg: StartConfig) -> i32 {
         } else {
             "open"
         },
-        if cfg.decide_token.is_some() {
-            "bearer-token"
+        if cfg.deciders.is_some() {
+            "tenant-bearing-registry"
+        } else if cfg.decide_token.is_some() {
+            "legacy-bearer-token"
         } else {
             "open"
         },
