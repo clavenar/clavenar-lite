@@ -1,0 +1,159 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://specs.clavenar.com/contracts/rooted-path-target-validation-v1.schema.json",
+  "title": "Clavenar rooted path and outbound target validation contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contract",
+    "filesystem",
+    "targets",
+    "surfaces",
+    "production"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "contract": { "const": "clavenar.rooted-path-target-validation/v1" },
+    "filesystem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rootAuthority",
+        "pathForm",
+        "maximumPathBytes",
+        "maximumComponents",
+        "rootSentinel",
+        "rejectedForms",
+        "resolution",
+        "operations",
+        "createParents",
+        "reopenResolvedPath"
+      ],
+      "properties": {
+        "rootAuthority": { "const": "opened-agent-directory-fd" },
+        "pathForm": { "const": "normalized-relative-utf8" },
+        "maximumPathBytes": { "const": 4096 },
+        "maximumComponents": { "const": 128 },
+        "rootSentinel": { "const": "." },
+        "rejectedForms": {
+          "const": [
+            "absolute",
+            "empty",
+            "nul",
+            "backslash",
+            "empty-segment",
+            "dot-segment",
+            "dot-dot-segment",
+            "intermediate-symlink",
+            "final-symlink",
+            "magic-link"
+          ]
+        },
+        "resolution": {
+          "const": [
+            "openat2-resolve-beneath",
+            "openat2-resolve-no-magiclinks",
+            "openat2-resolve-no-symlinks",
+            "o-no-follow"
+          ]
+        },
+        "operations": {
+          "const": [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "list_directory",
+            "search_files"
+          ]
+        },
+        "createParents": { "const": "mkdirat-then-openat2-no-follow" },
+        "reopenResolvedPath": { "const": false }
+      }
+    },
+    "targets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemes",
+        "normalization",
+        "allowlistMatch",
+        "credentialsAllowed",
+        "fragmentsAllowed",
+        "queryAuthority",
+        "rejectedHostClasses",
+        "emptyAllowlist",
+        "invalidAllowlist",
+        "redirects",
+        "dnsAnswerValidation",
+        "addressPinning"
+      ],
+      "properties": {
+        "schemes": { "const": ["http", "https"] },
+        "normalization": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scheme", "host", "port", "path"],
+          "properties": {
+            "scheme": { "const": "lowercase" },
+            "host": {
+              "const": "url-parser-idna-ascii-lowercase-no-trailing-dot"
+            },
+            "port": { "const": "effective-http-80-https-443" },
+            "path": { "const": "url-parser-dot-segment-normalized" }
+          }
+        },
+        "allowlistMatch": {
+          "const": [
+            "scheme",
+            "host",
+            "effective-port",
+            "path-segment-boundary"
+          ]
+        },
+        "credentialsAllowed": { "const": false },
+        "fragmentsAllowed": { "const": false },
+        "queryAuthority": { "const": false },
+        "rejectedHostClasses": {
+          "const": [
+            "localhost",
+            "local-use-name",
+            "single-label-name",
+            "unspecified-ip",
+            "loopback-ip",
+            "private-ip",
+            "link-local-ip",
+            "shared-address-space-ip",
+            "documentation-ip",
+            "benchmark-ip",
+            "multicast-ip",
+            "reserved-ip"
+          ]
+        },
+        "emptyAllowlist": { "const": "deny" },
+        "invalidAllowlist": { "const": "startup-refusal" },
+        "redirects": { "const": "disabled" },
+        "dnsAnswerValidation": { "const": "required-by-wp-13.5" },
+        "addressPinning": { "const": "required-by-wp-13.5" }
+      }
+    },
+    "surfaces": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["execFetch", "liteCallback"],
+      "properties": {
+        "execFetch": { "const": true },
+        "liteCallback": { "const": true }
+      }
+    },
+    "production": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["execIncluded", "execOptInAllowed"],
+      "properties": {
+        "execIncluded": { "const": false },
+        "execOptInAllowed": { "const": false }
+      }
+    }
+  }
+}

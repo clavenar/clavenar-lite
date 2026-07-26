@@ -1742,6 +1742,14 @@ async fn spawn_lite_with_callbacks(
     upstream_url: String,
     allowlist: Vec<String>,
 ) -> (SocketAddr, Arc<Ledger>) {
+    spawn_lite_with_callbacks_and_http(upstream_url, allowlist, reqwest::Client::new()).await
+}
+
+async fn spawn_lite_with_callbacks_and_http(
+    upstream_url: String,
+    allowlist: Vec<String>,
+    http: reqwest::Client,
+) -> (SocketAddr, Arc<Ledger>) {
     let policy = Arc::new(PolicyEngine::from_dir(&policies_dir(), 60).unwrap());
     let ledger = Arc::new(Ledger::open(":memory:").unwrap());
     let state = Arc::new(AppState {
@@ -1749,7 +1757,7 @@ async fn spawn_lite_with_callbacks(
         ledger: ledger.clone(),
         tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url,
-        http: reqwest::Client::new(),
+        http,
         agents: None,
         deciders: None,
         decide_token: None,
@@ -1842,13 +1850,54 @@ async fn callback_url_rejected_when_off_allowlist() {
 }
 
 #[tokio::test]
+async fn callback_url_rejects_prefix_confusion_userinfo_and_local_literals() {
+    let upstream = spawn_stub_upstream().await;
+    let (lite_addr, _ledger) = spawn_lite_with_callbacks(
+        format!("http://{}/mcp", upstream),
+        vec!["https://good.example.com/hil".to_string()],
+    )
+    .await;
+
+    for target in [
+        "https://good.example.com.evil/hil",
+        "https://good.example.com/hil-evil",
+        "https://user@good.example.com/hil",
+        "https://good.example.com/hil#fragment",
+        "http://127.0.0.1/hil",
+        "http://2130706433/hil",
+        "http://169.254.169.254/latest/meta-data",
+    ] {
+        let response = reqwest::Client::new()
+            .decision_post(format!("http://{}/mcp", lite_addr))
+            .header("X-Clavenar-Callback-URL", target)
+            .json(&serde_json::json!({
+                "method": "call_tool",
+                "params": { "name": "ping" }
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status().as_u16(),
+            400,
+            "{target} unexpectedly passed"
+        );
+    }
+}
+
+#[tokio::test]
 async fn callback_url_fires_on_decide() {
     let upstream = spawn_stub_upstream().await;
     let (cb_addr, captured) = spawn_callback_sink().await;
-    let cb_url = format!("http://{}/callback", cb_addr);
-    let (lite_addr, _ledger) = spawn_lite_with_callbacks(
+    let cb_url = "http://callback.example.com/callback".to_string();
+    let callback_http = reqwest::Client::builder()
+        .resolve("callback.example.com", cb_addr)
+        .build()
+        .unwrap();
+    let (lite_addr, _ledger) = spawn_lite_with_callbacks_and_http(
         format!("http://{}/mcp", upstream),
-        vec![format!("http://{}/", cb_addr)],
+        vec!["http://callback.example.com/".to_string()],
+        callback_http,
     )
     .await;
 

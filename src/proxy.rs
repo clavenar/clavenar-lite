@@ -58,6 +58,7 @@ use crate::ledger::{
 };
 use crate::policy::{AgentHistory, PolicyDecision, PolicyEngine, PolicyInput};
 use crate::rate_limit::{RateLimitOutcome, RateLimiter};
+use crate::target_validation;
 use crate::webhook::{self, WebhookEvent};
 
 const CORRELATION_HEADER: &str = "X-Clavenar-Correlation-Id";
@@ -536,12 +537,10 @@ pub struct AppState {
     /// return path — operators decide via `clavenar-lite pending decide`
     /// or curl.
     pub slack_webhook_url: Option<String>,
-    /// Async-HIL callback URL allowlist. Each entry is a literal URL
-    /// prefix; an inbound `X-Clavenar-Callback-URL` header is accepted
-    /// only if it starts with one of these prefixes. Empty list (the
-    /// default) means callback URLs are rejected entirely — partners
-    /// must poll. The allowlist protects against agents using
-    /// clavenar-lite as a reflector to ping arbitrary internal URLs.
+    /// Async-HIL callback URL allowlist. Each entry is a normalized HTTP(S)
+    /// origin plus path boundary. An inbound callback is accepted only when
+    /// scheme, normalized host, effective port, and a complete path segment
+    /// match. Empty list rejects callbacks entirely.
     pub callback_allowlist: Vec<String>,
     /// Optional outbound verdict-webhook URL. When set, every terminal
     /// pipeline outcome (allow / deny / park, plus the `would_*`
@@ -1212,20 +1211,15 @@ fn validate_callback_url(headers: &HeaderMap, state: &AppState) -> Result<Option
             CALLBACK_HEADER
         ));
     }
-    if reqwest::Url::parse(raw).is_err() {
-        return Err(format!("{} is not a valid URL: {:?}", CALLBACK_HEADER, raw));
-    }
-    if !state
-        .callback_allowlist
-        .iter()
-        .any(|prefix| raw.starts_with(prefix.as_str()))
-    {
-        return Err(format!(
-            "{} {:?} is not on the configured allowlist",
-            CALLBACK_HEADER, raw
-        ));
-    }
-    Ok(Some(raw.to_string()))
+    target_validation::validate_target(raw, &state.callback_allowlist)
+        .map(Some)
+        .map_err(|error| format!("{} {:?}: {error}", CALLBACK_HEADER, raw))
+}
+
+/// Parse and canonicalize callback allowlist entries during startup.
+pub fn normalize_callback_allowlist(entries: &[String]) -> Result<Vec<String>, String> {
+    target_validation::validate_embedded_contract()?;
+    target_validation::normalize_allowlist_strings(entries)
 }
 
 /// Wire shape for the async-HIL callback POST body. Mirrors the GET

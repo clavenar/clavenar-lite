@@ -35,6 +35,9 @@ Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `
 - `src/rate_limit.rs` — per-agent token-bucket gate at `/mcp` ingress (runs before brain/policy).
 - `src/report.rs` — observe→enforce graduation report, Ed25519-signed offline.
 - `src/slack.rs` / `src/webhook.rs` — optional fire-and-forget side-channels (Slack park alert / SIEM JSON verdict).
+- `src/target_validation.rs` — normalized scheme/IDNA host/effective-port/path
+  boundary matching for callback allowlists, with local/non-public targets
+  rejected before storage or delivery.
 - `src/supply_chain.rs` — pins first `tools/list`, diffs later ones → `tool_schema_poisoned` row.
 - `policies/governance.rego` — bundled baseline (denylist, intent threshold, business-hours, velocity, wire-transfer review). `tests/proxy_integration.rs`. `scripts/{smoke-e2e,smoke-install}.sh`. `docs/SEQUENCES.md`.
 - Routes (port 8088): `GET /`,`/health`,`/readyz`,`/metrics`; `POST /mcp`; `GET /pending`, `GET /pending/{id}`, `POST /pending/{id}/decide`.
@@ -51,6 +54,9 @@ Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `
 - Default mode is `enforce` (CLI/env default); README quickstarts set `observe` explicitly — keep that distinction intact.
 - `verify` exit codes are CI contracts: `0` valid, `1` runtime error, `2` for any invalid/unverifiable chain — tamper (the message points at the first bad seq) OR a row written under a newer `chain_version` this binary can't verify (message says "Upgrade", not tamper).
 - Two independent auth tokens: agent `--token` gates `/mcp` + pending reads; operator `--decide-token` gates decide — so an agent can't approve its own pending. Decide is idempotent: a second decide returns `409`, never a silent overwrite.
+- Callback allowlists are parsed, canonicalized URL boundaries rather than
+  string prefixes. Credentials, fragments, sibling domains, local-use names,
+  and non-public IP literals fail closed; redirects are not followed.
 - Rate-limit gate emits `429` + a `RateLimitDenied` ledger row + the `clavenar_lite_rate_limit_denied_total` counter; it runs before any brain/policy work.
 - `--verbose-verdicts` is a dev knob, OFF by default — it leaks detector logic to the caller; the binary logs a startup warning when on.
 - Dependency choices are load-bearing for the one-command static install: `reqwest` rustls-tls (no system openssl), `rusqlite` `bundled` (no system libsqlite). Don't reintroduce native-tls or a system-lib dep.

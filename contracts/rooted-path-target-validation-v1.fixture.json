@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "contract": "clavenar.rooted-path-target-validation/v1",
+  "filesystem": {
+    "rootAuthority": "opened-agent-directory-fd",
+    "pathForm": "normalized-relative-utf8",
+    "maximumPathBytes": 4096,
+    "maximumComponents": 128,
+    "rootSentinel": ".",
+    "rejectedForms": [
+      "absolute",
+      "empty",
+      "nul",
+      "backslash",
+      "empty-segment",
+      "dot-segment",
+      "dot-dot-segment",
+      "intermediate-symlink",
+      "final-symlink",
+      "magic-link"
+    ],
+    "resolution": [
+      "openat2-resolve-beneath",
+      "openat2-resolve-no-magiclinks",
+      "openat2-resolve-no-symlinks",
+      "o-no-follow"
+    ],
+    "operations": [
+      "read_file",
+      "write_file",
+      "edit_file",
+      "list_directory",
+      "search_files"
+    ],
+    "createParents": "mkdirat-then-openat2-no-follow",
+    "reopenResolvedPath": false
+  },
+  "targets": {
+    "schemes": [
+      "http",
+      "https"
+    ],
+    "normalization": {
+      "scheme": "lowercase",
+      "host": "url-parser-idna-ascii-lowercase-no-trailing-dot",
+      "port": "effective-http-80-https-443",
+      "path": "url-parser-dot-segment-normalized"
+    },
+    "allowlistMatch": [
+      "scheme",
+      "host",
+      "effective-port",
+      "path-segment-boundary"
+    ],
+    "credentialsAllowed": false,
+    "fragmentsAllowed": false,
+    "queryAuthority": false,
+    "rejectedHostClasses": [
+      "localhost",
+      "local-use-name",
+      "single-label-name",
+      "unspecified-ip",
+      "loopback-ip",
+      "private-ip",
+      "link-local-ip",
+      "shared-address-space-ip",
+      "documentation-ip",
+      "benchmark-ip",
+      "multicast-ip",
+      "reserved-ip"
+    ],
+    "emptyAllowlist": "deny",
+    "invalidAllowlist": "startup-refusal",
+    "redirects": "disabled",
+    "dnsAnswerValidation": "required-by-wp-13.5",
+    "addressPinning": "required-by-wp-13.5"
+  },
+  "surfaces": {
+    "execFetch": true,
+    "liteCallback": true
+  },
+  "production": {
+    "execIncluded": false,
+    "execOptInAllowed": false
+  }
+}

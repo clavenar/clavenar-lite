@@ -24,4 +24,5 @@ pub mod rate_limit;
 pub mod report;
 pub mod slack;
 pub mod supply_chain;
+mod target_validation;
 pub mod webhook;

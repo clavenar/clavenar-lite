@@ -14,7 +14,10 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use clavenar_lite::ledger::Ledger;
 use clavenar_lite::policy::PolicyEngine;
-use clavenar_lite::proxy::{AgentRegistry, AppState, ClavenarMode, TenantRegistry, build_router};
+use clavenar_lite::proxy::{
+    AgentRegistry, AppState, ClavenarMode, TenantRegistry, build_router,
+    normalize_callback_allowlist,
+};
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 use std::io::IsTerminal;
@@ -830,7 +833,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
     // Async-HIL callback allowlist. Empty list means callback URLs
     // are rejected at /mcp time — partners poll. We parse here so a
     // bad config fails boot rather than at first /mcp.
-    let callback_allowlist: Vec<String> = match cfg.callback_allowlist.as_deref() {
+    let raw_callback_allowlist: Vec<String> = match cfg.callback_allowlist.as_deref() {
         Some(spec) => spec
             .split(',')
             .map(str::trim)
@@ -839,19 +842,14 @@ async fn run_start(cfg: StartConfig) -> i32 {
             .collect(),
         None => Vec::new(),
     };
-    if !callback_allowlist.is_empty() {
-        // Reject prefixes that aren't valid URLs at boot — otherwise the
-        // allowlist match would happily allow agents to point at
-        // garbage URLs we'd silently fail to POST to.
-        for prefix in &callback_allowlist {
-            if reqwest::Url::parse(prefix).is_err() {
-                eprintln!(
-                    "error: --callback-allowlist prefix {:?} is not a valid URL",
-                    prefix
-                );
-                return 1;
-            }
+    let callback_allowlist = match normalize_callback_allowlist(&raw_callback_allowlist) {
+        Ok(allowlist) => allowlist,
+        Err(error) => {
+            eprintln!("error: --callback-allowlist is unsafe: {error}");
+            return 1;
         }
+    };
+    if !callback_allowlist.is_empty() {
         tracing::info!(
             allowlist_count = callback_allowlist.len(),
             "async-HIL callbacks enabled"

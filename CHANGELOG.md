@@ -288,3 +288,9 @@ format and chain shape are byte-compatible with the full edition.
 [0.3.0]: https://github.com/clavenar/clavenar-lite/releases/tag/v0.3.0
 [0.2.0]: https://github.com/clavenar/clavenar-lite/releases/tag/v0.2.0
 [0.1.0]: https://github.com/clavenar/clavenar-lite/releases/tag/v0.1.0
+## 0.10.0
+
+- Replace callback string-prefix matching with normalized HTTP(S) scheme,
+  IDNA host, effective-port, and path-segment-boundary validation. Reject
+  credentials, fragments, sibling domains, local-use names, and non-public IP
+  literals; invalid allowlist entries fail startup and redirects remain off.

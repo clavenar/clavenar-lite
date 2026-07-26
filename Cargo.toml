@@ -1,6 +1,6 @@
 [package]
 name = "clavenar-lite"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 description = "Community Edition of Clavenar — single-binary OSS proxy with embedded heuristic Brain, Rego policy engine, and SHA-256 hash-chained ledger."
 license = "Apache-2.0"
@@ -57,6 +57,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 thiserror = "1"
 async-trait = "0.1"
+url = "2"
 # Prometheus-format `/metrics` endpoint, same crate pair the full
 # edition (clavenar-proxy, clavenar-brain, clavenar-policy-engine,
 # clavenar-ledger, clavenar-hil, clavenar-identity) uses. Keeps scrape

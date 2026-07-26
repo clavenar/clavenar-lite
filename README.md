@@ -158,7 +158,7 @@ For real traffic, layer these on top of the default deploy:
   unknown ones. This registry takes precedence over the explicit
   single-user `CLAVENAR_LITE_DECIDE_TOKEN` compatibility path.
 - **Async-HIL webhooks.** Set
-  `CLAVENAR_LITE_CALLBACK_ALLOWLIST=https://my-app.example.com/`
+  `CLAVENAR_LITE_CALLBACK_ALLOWLIST=https://my-app.example.com/hil`
   (comma-separated prefixes) to enable agent-supplied callback
   URLs. Agents send `X-Clavenar-Callback-URL: <url>` on `/mcp`; on
   operator decide clavenar POSTs `{correlation_id, decision,
@@ -224,7 +224,7 @@ Every flag falls back to a `CLAVENAR_LITE_*` env var:
 | `--velocity-window`        | `CLAVENAR_LITE_VELOCITY_WINDOW_SECS`   | 60                        |
 | `--token`                  | `CLAVENAR_LITE_TOKEN`                  | (none — open access)      |
 | `--agents`                 | `CLAVENAR_LITE_AGENTS`                 | (none — single-agent)     |
-| `--callback-allowlist`     | `CLAVENAR_LITE_CALLBACK_ALLOWLIST`     | (none — callbacks off)    |
+| `--callback-allowlist`     | `CLAVENAR_LITE_CALLBACK_ALLOWLIST`     | (none — callbacks off); normalized HTTP(S) origin + path boundaries |
 | `--upstream-api-key`       | `CLAVENAR_LITE_UPSTREAM_API_KEY`       | (none — pass-through)     |
 | `--upstream-timeout-secs`  | `CLAVENAR_LITE_UPSTREAM_TIMEOUT_SECS`  | 120                       |
 | `--mode`                   | `CLAVENAR_LITE_MODE`                   | `enforce`                 |
