@@ -18,6 +18,7 @@ WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY contracts ./contracts
 COPY policies ./policies
 
 # Build the release binary. Docker's layer cache keeps the COPY +
