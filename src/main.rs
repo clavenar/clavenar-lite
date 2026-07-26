@@ -782,6 +782,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
 
     let http = match reqwest::Client::builder()
         .timeout(cfg.upstream_timeout)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,
