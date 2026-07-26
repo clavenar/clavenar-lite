@@ -1194,7 +1194,7 @@ const CALLBACK_HEADER: &str = "X-Clavenar-Callback-URL";
 /// - `Ok(None)` if no header was supplied (the partner is on the
 ///   polling path).
 /// - `Ok(Some(url))` if the header is present, syntactically a URL,
-///   and matches one of the configured allowlist prefixes.
+///   and matches a configured normalized origin and path boundary.
 /// - `Err(reason)` for an empty allowlist + non-empty header, a
 ///   malformed URL, or a URL outside the allowlist. The reason
 ///   string is surfaced verbatim in the 400 response body so the

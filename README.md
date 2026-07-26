@@ -159,7 +159,7 @@ For real traffic, layer these on top of the default deploy:
   single-user `CLAVENAR_LITE_DECIDE_TOKEN` compatibility path.
 - **Async-HIL webhooks.** Set
   `CLAVENAR_LITE_CALLBACK_ALLOWLIST=https://my-app.example.com/hil`
-  (comma-separated prefixes) to enable agent-supplied callback
+  (comma-separated normalized URL boundaries) to enable agent-supplied callback
   URLs. Agents send `X-Clavenar-Callback-URL: <url>` on `/mcp`; on
   operator decide clavenar POSTs `{correlation_id, decision,
   decider_note, decided_at}` to that URL fire-and-forget. URLs

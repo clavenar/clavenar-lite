@@ -137,10 +137,11 @@ enum Command {
         #[arg(long, env = "CLAVENAR_LITE_SLACK_WEBHOOK_URL")]
         slack_webhook_url: Option<String>,
 
-        /// Async-HIL callback-URL allowlist. Comma-separated literal
-        /// URL prefixes; an inbound `X-Clavenar-Callback-URL` header is
-        /// accepted only if it starts with one of these. Unset (the
-        /// default) means callback URLs are rejected — partners poll.
+        /// Async-HIL callback-URL allowlist. Comma-separated HTTP(S)
+        /// URL boundaries; an inbound `X-Clavenar-Callback-URL` header is
+        /// accepted only if its normalized scheme, host, effective port,
+        /// and path boundary match one of these. Unset (the default) means
+        /// callback URLs are rejected — partners poll.
         /// e.g. `--callback-allowlist https://my-app.example.com/`.
         /// Env `CLAVENAR_LITE_CALLBACK_ALLOWLIST`.
         #[arg(long, env = "CLAVENAR_LITE_CALLBACK_ALLOWLIST")]
