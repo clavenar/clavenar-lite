@@ -28,13 +28,13 @@ the developer profile; hosted templates use a separate fail-closed posture.
 docker run -p 8088:8088 \
   -e CLAVENAR_LITE_UPSTREAM_URL=https://mcp.your-company.com/rpc \
   -e CLAVENAR_LITE_MODE=observe \
-  ghcr.io/clavenar/clavenar-lite:latest
+  ghcr.io/clavenar/clavenar-lite:0.12.0
 ```
 
-The image is multi-arch (`linux/amd64` + `linux/arm64`), published from
-the [release workflow](.github/workflows/release.yml) on every `v*`
-tag. Pin to `:0.7.0` if you want a fixed version; `:latest` tracks the
-newest tagged release.
+The image is multi-arch (`linux/amd64` + `linux/arm64`) and published only
+after an accepted protected stack release dispatches the
+[release workflow](.github/workflows/release.yml). Use the exact version;
+the workflow does not publish a mutable `latest` tag.
 
 **Fly.io** (deploy button above, or):
 
@@ -55,7 +55,7 @@ chat-completions endpoint is not wire-compatible.
 **Static binary** (no Rust toolchain, no docker):
 
 ```bash
-V=0.7.0
+V=0.12.0
 curl -fsSL "https://github.com/clavenar/clavenar-lite/releases/download/v${V}/clavenar-lite-${V}-x86_64-linux-musl.tar.gz" \
   | tar -xz
 ./clavenar-lite start --mode observe \

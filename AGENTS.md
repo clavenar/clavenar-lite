@@ -18,12 +18,12 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo deny check all                       # supply-chain gate
 cargo cyclonedx --format json --describe crate   # SBOM
-docker build -t ghcr.io/clavenar/clavenar-lite:latest .
+docker build -t clavenar-lite:dev .
 ```
 
 Host-build caveat: `target/` may be root-owned from prior docker builds — pass `CARGO_TARGET_DIR=/tmp/clavenar-lite-target`. Release workflow ships multi-arch amd64+arm64 on `v*` tags; tag must match `Cargo.toml` version.
 
-Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `0.0.0.0:8088` (`--port` / `CLAVENAR_LITE_PORT`). Subcommands: `start`, `verify`, `audit <agent_id>`, `backup`, `restore`, `graduate {report,verify}`, `pending {list,get,decide}`. Every flag has a `CLAVENAR_LITE_*` env fallback (see README matrix).
+Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `0.0.0.0:8088` (`--port` / `CLAVENAR_LITE_PORT`). Subcommands: `start`, `verify`, `audit <agent_id>`, `backup`, `restore`, `graduate {report,verify}`, `pending {list,get,decide}`. Every flag has a `CLAVENAR_LITE_*` env fallback (see README matrix). The protected distribution event must match the Cargo version and exact signed-BOM source SHA before the workflow publishes a versioned image or static binary.
 
 ## Layout
 - `src/main.rs` — clap CLI, subcommand dispatch, fail-fast startup checks, `TcpListener` bind, `/metrics` wiring.

@@ -1,26 +1,17 @@
 name: release
-
-# Push a tag matching v* (e.g. v0.2.0) to publish. The tag must
-# match Cargo.toml's `version`; the workflow asserts this before
-# anything destructive runs.
+run-name: publish ${{ github.event.client_payload.publication_id }}
 #
 # What this ships:
 #   1. Multi-arch container image (linux/amd64 + linux/arm64) at
-#      ghcr.io/clavenar/clavenar-lite:{version} + :latest.
+#      ghcr.io/clavenar/clavenar-lite:{version}.
 #   2. Static linux-x86_64 binary (musl) as a release asset, for
 #      partners who want the binary outside a container.
 #   3. A GitHub release with the matching CHANGELOG.md section as
 #      the release body.
 #
-# First-time setup: after the first successful release run, flip
-# the GHCR package to public — Settings → Packages → clavenar-lite →
-# Change visibility → Public. Otherwise the docker run example in
-# the README requires an auth'd pull.
-
 on:
-  push:
-    tags:
-      - 'v*'
+  repository_dispatch:
+    types: [clavenar-protected-publication]
 
 permissions:
   contents: write   # required for `gh release create`
@@ -31,17 +22,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ github.event.client_payload.source_sha }}
 
-      - name: Verify tag matches Cargo.toml version
+      - name: Verify protected publication input
         id: ver
+        env:
+          COMPONENT_VERSION: ${{ github.event.client_payload.component_version }}
+          RELEASE_REFERENCE: ${{ github.event.client_payload.release_reference }}
+          SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
         run: |
-          TAG=${GITHUB_REF_NAME#v}
+          test "$GITHUB_ACTOR" = "vanteguardlabs"
+          [[ "$RELEASE_REFERENCE" =~ ^ghcr\.io/clavenar/clavenar-stack-release@sha256:[0-9a-f]{64}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          TAG="$COMPONENT_VERSION"
           CARGO_VERSION=$(grep -E '^version = ' Cargo.toml | head -1 | sed -E 's/version = "(.*)"/\1/')
           if [ "$TAG" != "$CARGO_VERSION" ]; then
-            echo "::error::tag $GITHUB_REF_NAME (=$TAG) does not match Cargo.toml ($CARGO_VERSION)"
+            echo "::error::protected component version $TAG does not match Cargo.toml ($CARGO_VERSION)"
             exit 1
           fi
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.97.0
+          targets: x86_64-unknown-linux-musl
+
+      - name: Verify the exact Lite source before publication
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked
+          cargo clippy --locked --all-targets -- -D warnings
 
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -60,7 +71,6 @@ jobs:
           push: true
           tags: |
             ghcr.io/clavenar/clavenar-lite:${{ steps.ver.outputs.version }}
-            ghcr.io/clavenar/clavenar-lite:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -83,11 +93,6 @@ jobs:
           fi
           echo "---release-notes.md---"
           cat release-notes.md
-
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          toolchain: 1.97.0
-          targets: x86_64-unknown-linux-musl
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -117,9 +122,18 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "${GITHUB_REF_NAME} — clavenar-lite" \
-            --notes-file release-notes.md \
-            "$asset" \
-            "${asset}.sha256"
+          tag="v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" \
+              --jq '.object.sha')" = "$SOURCE_SHA"
+            gh release upload "$tag" "$asset" "${asset}.sha256" --clobber
+          else
+            gh release create "$tag" --target "$SOURCE_SHA" \
+              --title "$tag — clavenar-lite" \
+              --notes-file release-notes.md \
+              "$asset" \
+              "${asset}.sha256"
+          fi
