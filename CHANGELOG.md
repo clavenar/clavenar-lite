@@ -6,6 +6,20 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-27
+
+### Security
+
+- Async-HIL callback delivery now resolves and validates the complete bounded
+  DNS answer set before each connection, rejects mixed public/non-public sets,
+  selects one public address deterministically, and pins it while retaining
+  the normalized hostname for HTTP Host, TLS SNI, and certificate
+  verification.
+- Redirects use an explicit five-hop loop. Every hop repeats URL
+  normalization, allowlist matching, complete-answer validation, and address
+  pinning; unsafe locations, HTTPS downgrade, loops, oversized bodies, and the
+  hop limit fail closed. Callback transport ignores ambient proxies.
+
 ## [0.9.0] - 2026-07-21
 
 ### Security
