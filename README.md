@@ -127,6 +127,7 @@ streaming, observe mode, retry, and verdict-callback options.
 | **Heuristic Brain**  | Scan payload for prompt injection / jailbreak / dangerous-tool signatures | Pure-Rust regex/substring matcher; ~14 needles                 |
 | **Policy Engine**    | Evaluate Rego rules over `tool_type`, `intent_score`, time-of-day, velocity | `regorus` (pure-Rust Rego), in-process velocity tracker        |
 | **Ledger**           | Append-only forensic store with SHA-256 hash chain                        | SQLite (bundled), `verify` and `audit` CLI subcommands         |
+| **Human review**     | Park Yellow-tier calls, poll pending state, and record an operator decision | Embedded pending store plus authenticated list/poll/decide APIs; records the decision but does not resume the approved call |
 | **Proxy**            | HTTP ingress, security-first orchestration, upstream credential injection | axum + reqwest, optional bearer-token auth                     |
 
 The chain format and policy input shape are byte-compatible with the
