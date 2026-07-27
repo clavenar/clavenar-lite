@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use serde_json::Value;
 use url::{Host, Url};
@@ -181,6 +181,13 @@ fn validate_percent_encoding(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn is_public_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => is_public_ipv4(address),
+        IpAddr::V6(address) => is_public_ipv6(address),
+    }
+}
+
 fn is_public_ipv4(address: Ipv4Addr) -> bool {
     let [a, b, c, _] = address.octets();
     !(a == 0
@@ -279,5 +286,33 @@ mod tests {
                 "{entry} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn dns_answer_classifier_rejects_every_non_public_class() {
+        for address in [
+            "0.0.0.0",
+            "10.1.2.3",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "172.16.0.1",
+            "192.0.2.1",
+            "192.168.1.1",
+            "198.18.0.1",
+            "203.0.113.1",
+            "224.0.0.1",
+            "::",
+            "::1",
+            "2001:db8::1",
+            "fc00::1",
+            "fe80::1",
+            "ff00::1",
+        ] {
+            let address = address.parse().unwrap();
+            assert!(!is_public_ip(address), "{address} was accepted");
+        }
+        assert!(is_public_ip("8.8.8.8".parse().unwrap()));
+        assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
     }
 }

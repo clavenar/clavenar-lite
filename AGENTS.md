@@ -56,7 +56,10 @@ Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `
 - Two independent auth tokens: agent `--token` gates `/mcp` + pending reads; operator `--decide-token` gates decide — so an agent can't approve its own pending. Decide is idempotent: a second decide returns `409`, never a silent overwrite.
 - Callback allowlists are parsed, canonicalized URL boundaries rather than
   string prefixes. Credentials, fragments, sibling domains, local-use names,
-  and non-public IP literals fail closed; redirects are not followed.
+  and non-public IP literals fail closed. The complete DNS set is validated
+  before each connection, a deterministic public address is pinned while
+  retaining hostname identity, and at most five manual redirects repeat the
+  full allowlist/resolve/validate/pin sequence.
 - Rate-limit gate emits `429` + a `RateLimitDenied` ledger row + the `clavenar_lite_rate_limit_denied_total` counter; it runs before any brain/policy work.
 - `--verbose-verdicts` is a dev knob, OFF by default — it leaks detector logic to the caller; the binary logs a startup warning when on.
 - Dependency choices are load-bearing for the one-command static install: `reqwest` rustls-tls (no system openssl), `rusqlite` `bundled` (no system libsqlite). Don't reintroduce native-tls or a system-lib dep.

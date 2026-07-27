@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "contract": "clavenar.outbound-resolution-pinning/v1",
+  "feature": "WP-13.5",
+  "surfaces": [
+    "exec-fetch",
+    "lite-callback"
+  ],
+  "resolution": {
+    "timing": "before-every-connection",
+    "answerSet": "complete",
+    "minimumAnswers": 1,
+    "maximumAnswers": 32,
+    "rejectWholeSetOnAnyNonPublicAnswer": true,
+    "deduplicate": true,
+    "selection": "ascending-family-then-network-bytes",
+    "pinSelectedAddress": true,
+    "retainNormalizedHostnameFor": [
+      "http-host",
+      "tls-sni",
+      "certificate-verification"
+    ],
+    "applicationClientReresolution": false,
+    "dnsResolveMillis": 2000
+  },
+  "redirects": {
+    "mode": "manual",
+    "maximumHops": 5,
+    "statuses": [
+      301,
+      302,
+      303,
+      307,
+      308
+    ],
+    "validateAndRepinEveryHop": true,
+    "reject": [
+      "missing-location",
+      "invalid-location",
+      "userinfo",
+      "fragment",
+      "non-http-scheme",
+      "allowlist-miss",
+      "https-to-http-downgrade",
+      "redirect-loop",
+      "hop-limit"
+    ],
+    "crossOriginSensitiveHeaders": "drop",
+    "methodPolicy": {
+      "301": "preserve",
+      "302": "preserve",
+      "303": "get-and-drop-body",
+      "307": "preserve",
+      "308": "preserve"
+    }
+  },
+  "limits": {
+    "execFetch": {
+      "requestBodyBytes": 1048576,
+      "responseBodyBytes": 1048576,
+      "wholeOperationMillis": 30000
+    },
+    "liteCallback": {
+      "requestBodyBytes": 65536,
+      "responseBodyBytes": 65536,
+      "wholeOperationMillis": 5000
+    },
+    "overflow": "abort-stream-and-fail"
+  },
+  "rebinding": {
+    "resolutionLifetime": "one-hop",
+    "connectionAddressSource": "validated-selected-answer",
+    "newResolutionOnlyFor": [
+      "validated-redirect-hop",
+      "new-delivery-attempt"
+    ]
+  },
+  "production": {
+    "execIncluded": false,
+    "execOptInAllowed": false,
+    "liteEmptyCallbackAllowlist": "deny"
+  }
+}

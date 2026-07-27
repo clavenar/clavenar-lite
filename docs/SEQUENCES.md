@@ -260,8 +260,12 @@ sequenceDiagram
         HookJob->>SIEM: POST WebhookEvent JSON (5s timeout)
     end
     opt decided.callback_url set
-        Proxy->>CbJob: spawn fire_callback(http, url, CallbackBody { correlation_id, decision, decider_note, decided_at })
-        CbJob->>Cb: POST CallbackBody JSON (5s timeout)
+        Proxy->>CbJob: spawn fire_callback(url, allowlist, CallbackBody)
+        CbJob->>CbJob: normalize + allowlist; resolve complete public answer set; pin deterministic address
+        CbJob->>Cb: POST CallbackBody JSON (5s whole-operation timeout)
+        opt redirect (maximum five)
+            CbJob->>CbJob: normalize + allowlist + fresh resolve + re-pin next hop
+        end
         Cb-->>CbJob: 2xx (or warn on non-2xx / send error)
     end
     Proxy-->>Op: 200 + PendingView (Pending serialised as JSON)

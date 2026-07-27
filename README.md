@@ -162,7 +162,12 @@ For real traffic, layer these on top of the default deploy:
   (comma-separated normalized URL boundaries) to enable agent-supplied callback
   URLs. Agents send `X-Clavenar-Callback-URL: <url>` on `/mcp`; on
   operator decide clavenar POSTs `{correlation_id, decision,
-  decider_note, decided_at}` to that URL fire-and-forget. URLs
+  decider_note, decided_at}` to that URL fire-and-forget. Each connection
+  validates the complete bounded DNS answer set, rejects the whole set if any
+  address is non-public, and pins one deterministic address while retaining
+  the hostname for Host, TLS SNI, and certificate verification. Up to five
+  redirects are normalized, allowlisted, freshly resolved, and re-pinned;
+  downgrade, loops, unsafe targets, and oversized responses fail closed. URLs
   outside the allowlist are rejected with 400. Unset (the default)
   rejects callbacks entirely — partners poll `GET /pending/{id}` with
   the same bearer that created the pending. The lookup predicates the

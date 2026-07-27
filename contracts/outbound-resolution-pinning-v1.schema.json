@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://specs.clavenar.com/contracts/outbound-resolution-pinning-v1.schema.json",
+  "title": "Clavenar outbound resolution and address pinning v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contract",
+    "feature",
+    "surfaces",
+    "resolution",
+    "redirects",
+    "limits",
+    "rebinding",
+    "production"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "contract": { "const": "clavenar.outbound-resolution-pinning/v1" },
+    "feature": { "const": "WP-13.5" },
+    "surfaces": { "const": ["exec-fetch", "lite-callback"] },
+    "resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "timing",
+        "answerSet",
+        "minimumAnswers",
+        "maximumAnswers",
+        "rejectWholeSetOnAnyNonPublicAnswer",
+        "deduplicate",
+        "selection",
+        "pinSelectedAddress",
+        "retainNormalizedHostnameFor",
+        "applicationClientReresolution",
+        "dnsResolveMillis"
+      ],
+      "properties": {
+        "timing": { "const": "before-every-connection" },
+        "answerSet": { "const": "complete" },
+        "minimumAnswers": { "const": 1 },
+        "maximumAnswers": { "const": 32 },
+        "rejectWholeSetOnAnyNonPublicAnswer": { "const": true },
+        "deduplicate": { "const": true },
+        "selection": { "const": "ascending-family-then-network-bytes" },
+        "pinSelectedAddress": { "const": true },
+        "retainNormalizedHostnameFor": {
+          "const": ["http-host", "tls-sni", "certificate-verification"]
+        },
+        "applicationClientReresolution": { "const": false },
+        "dnsResolveMillis": { "const": 2000 }
+      }
+    },
+    "redirects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "maximumHops",
+        "statuses",
+        "validateAndRepinEveryHop",
+        "reject",
+        "crossOriginSensitiveHeaders",
+        "methodPolicy"
+      ],
+      "properties": {
+        "mode": { "const": "manual" },
+        "maximumHops": { "const": 5 },
+        "statuses": { "const": [301, 302, 303, 307, 308] },
+        "validateAndRepinEveryHop": { "const": true },
+        "reject": {
+          "const": [
+            "missing-location",
+            "invalid-location",
+            "userinfo",
+            "fragment",
+            "non-http-scheme",
+            "allowlist-miss",
+            "https-to-http-downgrade",
+            "redirect-loop",
+            "hop-limit"
+          ]
+        },
+        "crossOriginSensitiveHeaders": { "const": "drop" },
+        "methodPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["301", "302", "303", "307", "308"],
+          "properties": {
+            "301": { "const": "preserve" },
+            "302": { "const": "preserve" },
+            "303": { "const": "get-and-drop-body" },
+            "307": { "const": "preserve" },
+            "308": { "const": "preserve" }
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["execFetch", "liteCallback", "overflow"],
+      "properties": {
+        "execFetch": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requestBodyBytes",
+            "responseBodyBytes",
+            "wholeOperationMillis"
+          ],
+          "properties": {
+            "requestBodyBytes": { "const": 1048576 },
+            "responseBodyBytes": { "const": 1048576 },
+            "wholeOperationMillis": { "const": 30000 }
+          }
+        },
+        "liteCallback": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "requestBodyBytes",
+            "responseBodyBytes",
+            "wholeOperationMillis"
+          ],
+          "properties": {
+            "requestBodyBytes": { "const": 65536 },
+            "responseBodyBytes": { "const": 65536 },
+            "wholeOperationMillis": { "const": 5000 }
+          }
+        },
+        "overflow": { "const": "abort-stream-and-fail" }
+      }
+    },
+    "rebinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resolutionLifetime",
+        "connectionAddressSource",
+        "newResolutionOnlyFor"
+      ],
+      "properties": {
+        "resolutionLifetime": { "const": "one-hop" },
+        "connectionAddressSource": { "const": "validated-selected-answer" },
+        "newResolutionOnlyFor": {
+          "const": ["validated-redirect-hop", "new-delivery-attempt"]
+        }
+      }
+    },
+    "production": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "execIncluded",
+        "execOptInAllowed",
+        "liteEmptyCallbackAllowlist"
+      ],
+      "properties": {
+        "execIncluded": { "const": false },
+        "execOptInAllowed": { "const": false },
+        "liteEmptyCallbackAllowlist": { "const": "deny" }
+      }
+    }
+  }
+}

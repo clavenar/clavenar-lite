@@ -1131,7 +1131,7 @@ async fn handle_decide_pending(
     // endpoint — the pendings row is the durable source of truth and
     // the partner can always fall back to polling.
     if let Some(url) = decided.callback_url.clone() {
-        let http = state.http.clone();
+        let callback_allowlist = state.callback_allowlist.clone();
         let body_owned = (
             decided.correlation_id.clone(),
             decided.decision.clone().unwrap_or_default(),
@@ -1141,8 +1141,8 @@ async fn handle_decide_pending(
         tokio::spawn(async move {
             let (corr, decision, note, ts) = &body_owned;
             fire_callback(
-                http,
                 url,
+                callback_allowlist,
                 CallbackBody {
                     correlation_id: corr,
                     decision,
@@ -1219,6 +1219,7 @@ fn validate_callback_url(headers: &HeaderMap, state: &AppState) -> Result<Option
 /// Parse and canonicalize callback allowlist entries during startup.
 pub fn normalize_callback_allowlist(entries: &[String]) -> Result<Vec<String>, String> {
     target_validation::validate_embedded_contract()?;
+    crate::outbound_resolution_contract::validate_embedded_contract()?;
     target_validation::normalize_allowlist_strings(entries)
 }
 
@@ -1259,7 +1260,7 @@ fn maybe_fire_webhook(state: &AppState, event: WebhookEvent<'_>) {
 /// Fire-and-forget POST of a decision to a partner's callback URL.
 /// Never blocks the operator's decide response — failures land in
 /// the trace log and the partner falls back to polling.
-async fn fire_callback(http: reqwest::Client, url: String, body: CallbackBody<'_>) {
+async fn fire_callback(url: String, allowlist: Vec<String>, body: CallbackBody<'_>) {
     let payload = match serde_json::to_vec(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -1267,22 +1268,15 @@ async fn fire_callback(http: reqwest::Client, url: String, body: CallbackBody<'_
             return;
         }
     };
-    let res = http
-        .post(&url)
-        .header("content-type", "application/json")
-        .timeout(std::time::Duration::from_secs(5))
-        .body(payload)
-        .send()
-        .await;
-    match res {
-        Ok(r) if r.status().is_success() => {
-            tracing::info!("callback {}: delivered ({})", url, r.status());
+    match crate::outbound_callback::post_json(url.clone(), payload, &allowlist).await {
+        Ok(status) if status.is_success() => {
+            tracing::info!("callback {}: delivered ({})", url, status);
         }
-        Ok(r) => {
-            tracing::warn!("callback {}: returned non-2xx {}", url, r.status());
+        Ok(status) => {
+            tracing::warn!("callback {}: returned non-2xx {}", url, status);
         }
-        Err(e) => {
-            tracing::warn!("callback {}: send failed: {}", url, e);
+        Err(error) => {
+            tracing::warn!("callback {}: send failed: {}", url, error);
         }
     }
 }

@@ -1886,18 +1886,13 @@ async fn callback_url_rejects_prefix_confusion_userinfo_and_local_literals() {
 }
 
 #[tokio::test]
-async fn callback_url_fires_on_decide() {
+async fn callback_url_is_retained_through_decide() {
     let upstream = spawn_stub_upstream().await;
-    let (cb_addr, captured) = spawn_callback_sink().await;
     let cb_url = "http://callback.example.com/callback".to_string();
-    let callback_http = reqwest::Client::builder()
-        .resolve("callback.example.com", cb_addr)
-        .build()
-        .unwrap();
-    let (lite_addr, _ledger) = spawn_lite_with_callbacks_and_http(
+    let (lite_addr, ledger) = spawn_lite_with_callbacks_and_http(
         format!("http://{}/mcp", upstream),
         vec!["http://callback.example.com/".to_string()],
-        callback_http,
+        reqwest::Client::new(),
     )
     .await;
 
@@ -1919,8 +1914,9 @@ async fn callback_url_fires_on_decide() {
     let parked_body: serde_json::Value = resp.json().await.unwrap();
     let corr = parked_body["correlation_id"].as_str().unwrap().to_string();
 
-    // Operator approves the pending — this should fire-and-forget POST
-    // the decision to the callback URL.
+    // Operator approval retains the normalized callback on the durable
+    // pending. Delivery itself uses public DNS and cannot safely target this
+    // process-local test listener.
     let decide = reqwest::Client::new()
         .post(format!("http://{}/pending/{}/decide", lite_addr, corr))
         .json(&serde_json::json!({ "decision": "allow", "note": "approved" }))
@@ -1929,22 +1925,9 @@ async fn callback_url_fires_on_decide() {
         .unwrap();
     assert_eq!(decide.status().as_u16(), 200);
 
-    // Give the spawned webhook time to land — fire-and-forget.
-    for _ in 0..50 {
-        if !captured.lock().unwrap().is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let bodies = captured.lock().unwrap().clone();
-    assert_eq!(bodies.len(), 1, "expected exactly one callback delivery");
-    let body = &bodies[0];
-    assert_eq!(body["correlation_id"], serde_json::Value::String(corr));
-    assert_eq!(body["decision"], serde_json::Value::String("allow".into()));
-    assert_eq!(
-        body["decider_note"],
-        serde_json::Value::String("approved".into())
-    );
+    let decided = ledger.get_pending(&corr).await.unwrap().unwrap();
+    assert_eq!(decided.callback_url.as_deref(), Some(cb_url.as_str()));
+    assert_eq!(decided.decision.as_deref(), Some("allow"));
 }
 
 // ---- Outbound verdict webhooks ---------------------------------------------
