@@ -65,7 +65,7 @@ url = "2"
 # tooling identical: one Prometheus + Grafana stack reads any
 # clavenar component.
 metrics = "0.22"
-metrics-exporter-prometheus = "0.14"
+metrics-exporter-prometheus = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 # Spawning a stub upstream from integration tests.
