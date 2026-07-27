@@ -6,6 +6,20 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-27
+
+### Security
+
+- Hosted templates now select an explicit fail-closed profile requiring
+  distinct agent/operator authentication, enforce mode, bounded rate and
+  upstream limits, durable `/data` SQLite state, and a continuously running
+  machine. Missing, ambiguous, overlapping, ephemeral, placeholder, or
+  otherwise unsafe settings refuse startup.
+- The hosted upstream uses an explicit `mcp-jsonrpc-v1` adapter with 1 MiB
+  request/response caps, a 30-second whole-operation ceiling, JSON content and
+  JSON-RPC 2.0 validation, and exact request/response ID binding. The
+  incompatible OpenAI chat-completions Fly default has been removed.
+
 ## [0.11.0] - 2026-07-27
 
 ### Security

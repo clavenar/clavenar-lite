@@ -53,17 +53,21 @@ echo
 cleanup
 "${DOCKER[@]}" network create "$NET" >/dev/null
 
-# Upstream echo stub. Accepts any POST, returns 200 + a sentinel body
-# so the agent-side smoke can assert clavenar-lite actually forwarded.
+# MCP JSON-RPC stub. Returns the exact request id plus a sentinel result so the
+# smoke proves the compatible adapter, not raw JSON pass-through.
 "${DOCKER[@]}" run -d --rm --name "$STUB" --network "$NET" \
     -p "$STUB_HOST_PORT:9000" \
     python:3.12-alpine python -c '
-import http.server, socketserver
+import http.server, json, socketserver
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("content-length", 0) or 0)
-        self.rfile.read(n)
-        body = b"{\"upstream\":\"ok\"}"
+        request = json.loads(self.rfile.read(n))
+        body = json.dumps({
+            "jsonrpc": "2.0",
+            "id": request.get("id"),
+            "result": {"upstream": "ok"},
+        }, separators=(",", ":")).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
@@ -76,6 +80,7 @@ socketserver.TCPServer(("", 9000), H).serve_forever()
 "${DOCKER[@]}" run -d --rm --name "$LITE" --network "$NET" \
     -p "$HOST_PORT:8088" \
     -e "CLAVENAR_LITE_UPSTREAM_URL=http://$STUB:9000" \
+    -e "CLAVENAR_LITE_UPSTREAM_ADAPTER=mcp-jsonrpc-v1" \
     -e "CLAVENAR_LITE_TOKEN=$AGENT_TOKEN" \
     -e "CLAVENAR_LITE_DECIDE_TOKEN=$DECIDE_TOKEN" \
     -e "CLAVENAR_LITE_LEDGER=/tmp/clavenar-smoke.db" \

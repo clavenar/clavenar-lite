@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "contract": "clavenar.hosted-lite-safety/v1",
+  "feature": "WP-13.6",
+  "profiles": {
+    "developer": {
+      "default": true,
+      "unsafeHostedUse": false
+    },
+    "hosted": {
+      "selection": "explicit",
+      "environment": "CLAVENAR_LITE_DEPLOYMENT_PROFILE=hosted",
+      "startupRefusal": true
+    }
+  },
+  "authentication": {
+    "agentRegistry": "exactly-one-of-token-or-agents",
+    "operatorRegistry": "exactly-one-of-decide-token-or-deciders",
+    "minimumTokenBytes": 32,
+    "emptyEntries": "reject",
+    "agentOperatorOverlap": "reject-constant-time",
+    "anonymousMcp": false,
+    "anonymousPendingRead": false,
+    "anonymousDecision": false
+  },
+  "posture": {
+    "mode": "enforce",
+    "verboseVerdicts": false,
+    "callbackEmptyAllowlist": "deny"
+  },
+  "rateLimit": {
+    "required": true,
+    "scope": "tenant-agent",
+    "minimumQps": 0.1,
+    "maximumQps": 100.0,
+    "minimumBurst": 1,
+    "maximumBurst": 200,
+    "beforePipeline": true,
+    "denialStatus": 429,
+    "denialLedgerRow": true
+  },
+  "durability": {
+    "ledger": "absolute-file-backed-sqlite",
+    "reject": [
+      "memory",
+      "relative-path",
+      "temporary-path"
+    ],
+    "requiredState": [
+      "hash-chain",
+      "pending",
+      "decision",
+      "server-execution"
+    ],
+    "hostedMount": "/data",
+    "scaleToZero": false,
+    "minimumMachines": 1,
+    "restartVerification": true
+  },
+  "adapter": {
+    "required": true,
+    "identifier": "mcp-jsonrpc-v1",
+    "upstreamScheme": "https",
+    "placeholderHosts": "reject",
+    "requestContentType": "application/json",
+    "responseContentType": "application/json",
+    "jsonRpcVersion": "2.0",
+    "responseId": "exact-request-id",
+    "requestBodyBytes": 1048576,
+    "responseBodyBytes": 1048576,
+    "wholeOperationMillis": 30000,
+    "automaticEffectRetries": 0,
+    "overflow": "abort-and-fail"
+  },
+  "hostedTemplate": {
+    "profileSelected": true,
+    "persistentVolume": true,
+    "enforceMode": true,
+    "boundedRateLimit": true,
+    "boundedUpstream": true,
+    "compatibleAdapter": true,
+    "secretsRequiredBeforeReady": [
+      "agent-auth",
+      "operator-auth",
+      "upstream-url"
+    ]
+  },
+  "production": {
+    "execIncluded": false,
+    "execOptInAllowed": false
+  }
+}

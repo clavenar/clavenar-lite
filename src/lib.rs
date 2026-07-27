@@ -17,6 +17,8 @@
 //! production deployments.
 
 pub mod heuristics;
+pub mod hosted_safety;
+mod hosted_safety_contract;
 pub mod ledger;
 mod outbound_callback;
 mod outbound_resolution_contract;
@@ -27,4 +29,5 @@ pub mod report;
 pub mod slack;
 pub mod supply_chain;
 mod target_validation;
+pub mod upstream_adapter;
 pub mod webhook;

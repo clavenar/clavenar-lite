@@ -4,11 +4,9 @@
 # (Fly requires globally-unique app names; this template uses a
 # placeholder).
 #
-# Defaults are tuned for the 60-second deploy story: shared CPU,
-# observe mode so first traffic doesn't 403, in-memory ledger so
-# there's no volume to provision before traffic flows. Flip to
-# enforce + a real ledger before you wire production agents at it
-# — see README "Promoting to production".
+# The hosted profile is intentionally fail-closed. The machine will not become
+# ready until distinct agent/operator secrets and a real HTTPS MCP JSON-RPC
+# upstream replace the placeholder values.
 
 app = "clavenar-lite"
 primary_region = "iad"
@@ -19,24 +17,26 @@ kill_timeout = "15s"
 dockerfile = "Dockerfile"
 
 [env]
-# Start partners off in observe so the first request through the
-# proxy doesn't 403 and burn the demo. Flip to enforce via
-# `fly secrets set CLAVENAR_LITE_MODE=enforce` once the verdicts
-# are trustworthy.
-CLAVENAR_LITE_MODE = "observe"
-# Point at OpenAI by default so a copy-paste fly launch yields a
-# working LLM proxy. Override to your real upstream.
-CLAVENAR_LITE_UPSTREAM_URL = "https://api.openai.com/v1/chat/completions"
+CLAVENAR_LITE_DEPLOYMENT_PROFILE = "hosted"
+CLAVENAR_LITE_MODE = "enforce"
+CLAVENAR_LITE_LEDGER = "/data/clavenar-lite.db"
+CLAVENAR_LITE_RATE_LIMIT_QPS = "10"
+CLAVENAR_LITE_RATE_LIMIT_BURST = "20"
+CLAVENAR_LITE_UPSTREAM_TIMEOUT_SECS = "30"
+CLAVENAR_LITE_UPSTREAM_ADAPTER = "mcp-jsonrpc-v1"
+CLAVENAR_LITE_UPSTREAM_URL = "https://replace-me.invalid/mcp"
 RUST_LOG = "info"
+
+[[mounts]]
+source = "clavenar_lite_data"
+destination = "/data"
 
 [http_service]
 internal_port = 8088
 force_https = true
-# Auto-stop keeps the free-tier deploy cheap when traffic is bursty;
-# auto-start brings the machine back on the next request, ~2s cold start.
-auto_stop_machines = "stop"
+auto_stop_machines = false
 auto_start_machines = true
-min_machines_running = 0
+min_machines_running = 1
 processes = ["app"]
 
 [[http_service.checks]]

@@ -12,12 +12,16 @@
 
 use chrono::Utc;
 use clap::{Parser, Subcommand};
+use clavenar_lite::hosted_safety::{
+    DeploymentProfile, HostedSafetyConfig, validate as validate_hosted_safety,
+};
 use clavenar_lite::ledger::Ledger;
 use clavenar_lite::policy::PolicyEngine;
 use clavenar_lite::proxy::{
     AgentRegistry, AppState, ClavenarMode, TenantRegistry, build_router,
     normalize_callback_allowlist,
 };
+use clavenar_lite::upstream_adapter::UpstreamAdapter;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 use std::io::IsTerminal;
@@ -58,6 +62,26 @@ enum Command {
         /// Default `http://localhost:9000/mcp` (env `CLAVENAR_LITE_UPSTREAM_URL`).
         #[arg(long, env = "CLAVENAR_LITE_UPSTREAM_URL")]
         upstream: Option<String>,
+
+        /// Deployment safety profile. `developer` retains local defaults;
+        /// `hosted` requires authenticated, durable, bounded configuration.
+        /// Env `CLAVENAR_LITE_DEPLOYMENT_PROFILE`.
+        #[arg(
+            long,
+            env = "CLAVENAR_LITE_DEPLOYMENT_PROFILE",
+            value_parser = parse_deployment_profile
+        )]
+        deployment_profile: Option<DeploymentProfile>,
+
+        /// Upstream wire adapter. Hosted deployments require
+        /// `mcp-jsonrpc-v1`; developer mode defaults to `raw-json`.
+        /// Env `CLAVENAR_LITE_UPSTREAM_ADAPTER`.
+        #[arg(
+            long,
+            env = "CLAVENAR_LITE_UPSTREAM_ADAPTER",
+            value_parser = parse_upstream_adapter
+        )]
+        upstream_adapter: Option<UpstreamAdapter>,
 
         /// Directory containing `*.rego` policy files. Default `./policies`
         /// (env `CLAVENAR_LITE_POLICY_DIR`).
@@ -405,6 +429,8 @@ async fn main() {
         Command::Start {
             port,
             upstream,
+            deployment_profile,
+            upstream_adapter,
             policies,
             ledger,
             velocity_window,
@@ -424,6 +450,8 @@ async fn main() {
         } => {
             let port = port.unwrap_or(8088);
             let upstream = upstream.unwrap_or_else(|| "http://localhost:9000/mcp".into());
+            let deployment_profile = deployment_profile.unwrap_or_default();
+            let upstream_adapter = upstream_adapter.unwrap_or_default();
             let policies = policies.unwrap_or_else(|| PathBuf::from("./policies"));
             let ledger_path = ledger.unwrap_or_else(|| "./clavenar-lite.db".into());
             let velocity_window = velocity_window.unwrap_or(60);
@@ -440,6 +468,8 @@ async fn main() {
             run_start(StartConfig {
                 port,
                 upstream,
+                deployment_profile,
+                upstream_adapter,
                 policies,
                 ledger_path,
                 velocity_window,
@@ -728,6 +758,8 @@ fn open_ledger(path: &str) -> Result<Ledger, i32> {
 struct StartConfig {
     port: u16,
     upstream: String,
+    deployment_profile: DeploymentProfile,
+    upstream_adapter: UpstreamAdapter,
     policies: PathBuf,
     ledger_path: String,
     velocity_window: u64,
@@ -759,7 +791,34 @@ fn parse_mode(s: &str) -> Result<ClavenarMode, String> {
     }
 }
 
+fn parse_deployment_profile(value: &str) -> Result<DeploymentProfile, String> {
+    value.parse()
+}
+
+fn parse_upstream_adapter(value: &str) -> Result<UpstreamAdapter, String> {
+    value.parse()
+}
+
 async fn run_start(cfg: StartConfig) -> i32 {
+    if let Err(error) = validate_hosted_safety(&HostedSafetyConfig {
+        profile: cfg.deployment_profile,
+        agent_token: cfg.token.as_deref(),
+        agents: cfg.agents.as_deref(),
+        decide_token: cfg.decide_token.as_deref(),
+        deciders: cfg.deciders.as_deref(),
+        enforce_mode: cfg.mode == ClavenarMode::Enforce,
+        verbose_verdicts: cfg.verbose_verdicts,
+        rate_limit_qps: cfg.rate_limit_qps,
+        rate_limit_burst: cfg.rate_limit_burst,
+        ledger_path: &cfg.ledger_path,
+        upstream_url: &cfg.upstream,
+        upstream_adapter: cfg.upstream_adapter,
+        upstream_timeout: cfg.upstream_timeout,
+    }) {
+        eprintln!("error: unsafe hosted configuration: {error}");
+        return 1;
+    }
+
     // Validate the upstream URL at startup so a typo surfaces here
     // rather than as a 502 on the first request.
     if let Err(e) = reqwest::Url::parse(&cfg.upstream) {
@@ -895,6 +954,7 @@ async fn run_start(cfg: StartConfig) -> i32 {
         ledger,
         tool_pins: Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url: cfg.upstream.clone(),
+        upstream_adapter: cfg.upstream_adapter,
         http,
         agents,
         deciders,
@@ -976,17 +1036,21 @@ async fn run_start(cfg: StartConfig) -> i32 {
     let addr = SocketAddr::from(([0, 0, 0, 0], cfg.port));
 
     tracing::info!(
-        "clavenar-lite listening on http://{} (mode={}, upstream={}, policies={}, ledger={}, auth={}, decide_auth={}, slack_alerts={}, verdict_webhook={}, upstream_timeout={}s)",
+        "clavenar-lite listening on http://{} (profile={:?}, mode={}, upstream={}, adapter={}, policies={}, ledger={}, auth={}, decide_auth={}, slack_alerts={}, verdict_webhook={}, upstream_timeout={}s)",
         addr,
+        cfg.deployment_profile,
         match cfg.mode {
             ClavenarMode::Enforce => "enforce",
             ClavenarMode::Observe => "observe",
         },
         cfg.upstream,
+        cfg.upstream_adapter,
         cfg.policies.display(),
         cfg.ledger_path,
-        if cfg.token.is_some() {
-            "bearer-token"
+        if cfg.agents.is_some() {
+            "agent-registry"
+        } else if cfg.token.is_some() {
+            "legacy-bearer-token"
         } else {
             "open"
         },

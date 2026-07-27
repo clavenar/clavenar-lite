@@ -40,7 +40,7 @@
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -59,6 +59,7 @@ use crate::ledger::{
 use crate::policy::{AgentHistory, PolicyDecision, PolicyEngine, PolicyInput};
 use crate::rate_limit::{RateLimitOutcome, RateLimiter};
 use crate::target_validation;
+use crate::upstream_adapter::{REQUEST_BODY_BYTES, UpstreamAdapter};
 use crate::webhook::{self, WebhookEvent};
 
 const CORRELATION_HEADER: &str = "X-Clavenar-Correlation-Id";
@@ -509,6 +510,9 @@ pub struct AppState {
     /// pinned and later lists are diffed against it (rug-pull catch).
     pub tool_pins: Arc<crate::supply_chain::ToolPinStore>,
     pub upstream_url: String,
+    /// Explicit upstream wire contract. Hosted deployments require
+    /// `mcp-jsonrpc-v1`; developer mode may retain raw JSON pass-through.
+    pub upstream_adapter: UpstreamAdapter,
     pub http: reqwest::Client,
     /// Optional per-agent identity registry. `None` means inbound auth
     /// is disabled (developer-laptop default). A single-entry registry
@@ -692,6 +696,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/pending", get(handle_list_pendings))
         .route("/pending/{id}", get(handle_get_pending))
         .route("/pending/{id}/decide", post(handle_decide_pending))
+        .layer(DefaultBodyLimit::max(REQUEST_BODY_BYTES))
         .with_state(state)
 }
 
@@ -1341,6 +1346,14 @@ async fn handle_mcp(
         )
             .into_response();
     }
+    if let Err(error) = state.upstream_adapter.validate_request(&body) {
+        return (
+            StatusCode::BAD_REQUEST,
+            clavenar_headers(&correlation_id, state.mode, false, false),
+            error,
+        )
+            .into_response();
+    }
     if server_execution.is_none() && decision.is_none() && !is_mcp_control_method(&parsed.method) {
         return client_migration_required(&correlation_id, state.mode);
     }
@@ -1849,16 +1862,16 @@ async fn handle_mcp(
             }
         }
     }
-    let mut req_builder = state
-        .http
-        .post(&state.upstream_url)
-        .header("Content-Type", "application/json")
-        .body(body.clone());
-    if let Some(api_key) = &state.upstream_api_key {
-        req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
-    }
-
-    let upstream = match req_builder.send().await {
+    let upstream = match state
+        .upstream_adapter
+        .forward(
+            &state.http,
+            &state.upstream_url,
+            state.upstream_api_key.as_deref(),
+            body.clone(),
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             if server_binding.is_some() {
@@ -1879,32 +1892,9 @@ async fn handle_mcp(
         }
     };
 
-    let status = upstream.status();
-    let upstream_content_type = upstream
-        .headers()
-        .get(axum::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
-    let upstream_body = match upstream.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            if server_binding.is_some() {
-                tracing::error!("durable server execution response outcome uncertain: {e}");
-                return server_execution_error(
-                    StatusCode::CONFLICT,
-                    "server_execution_uncertain",
-                    &correlation_id,
-                    state.mode,
-                );
-            }
-            return (
-                StatusCode::BAD_GATEWAY,
-                clavenar_headers(&correlation_id, state.mode, would_deny, would_pend),
-                format!("upstream body read error: {}", e),
-            )
-                .into_response();
-        }
-    };
+    let status = upstream.status;
+    let upstream_content_type = upstream.content_type;
+    let upstream_body = upstream.body;
 
     let durable_completion = if let Some(binding) = server_binding.as_ref() {
         match state
@@ -2012,15 +2002,16 @@ async fn forward_control(
     method: &str,
     body: Bytes,
 ) -> axum::response::Response {
-    let mut req_builder = state
-        .http
-        .post(&state.upstream_url)
-        .header("Content-Type", "application/json")
-        .body(body);
-    if let Some(api_key) = &state.upstream_api_key {
-        req_builder = req_builder.header("Authorization", format!("Bearer {}", api_key));
-    }
-    let upstream = match req_builder.send().await {
+    let upstream = match state
+        .upstream_adapter
+        .forward(
+            &state.http,
+            &state.upstream_url,
+            state.upstream_api_key.as_deref(),
+            body,
+        )
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             return (
@@ -2031,18 +2022,8 @@ async fn forward_control(
                 .into_response();
         }
     };
-    let status = upstream.status();
-    let upstream_body = match upstream.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                clavenar_headers(correlation_id, state.mode, false, false),
-                format!("upstream body read error: {}", e),
-            )
-                .into_response();
-        }
-    };
+    let status = upstream.status;
+    let upstream_body = upstream.body;
     if method == "tools/list" {
         crate::supply_chain::observe_tools_list(
             state,
@@ -2290,6 +2271,7 @@ mod tests {
             ledger,
             tool_pins: std::sync::Arc::new(crate::supply_chain::ToolPinStore::new()),
             upstream_url: "http://127.0.0.1:0/never-called".into(),
+            upstream_adapter: UpstreamAdapter::RawJson,
             http: reqwest::Client::new(),
             agents: None,
             deciders: None,

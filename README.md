@@ -20,14 +20,13 @@ chain-version dispatch — plus a tier/mode flowchart, live in
 ## Run it in 60 seconds
 
 Pick whichever surface fits how you ship today. All three boot with
-`observe` mode set so the first request through the proxy never 403s
-— flip to `enforce` when you trust the verdicts.
+the developer profile; hosted templates use a separate fail-closed posture.
 
 **Container** (no Rust toolchain needed):
 
 ```bash
 docker run -p 8088:8088 \
-  -e CLAVENAR_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completions \
+  -e CLAVENAR_LITE_UPSTREAM_URL=https://mcp.your-company.com/rpc \
   -e CLAVENAR_LITE_MODE=observe \
   ghcr.io/clavenar/clavenar-lite:latest
 ```
@@ -41,9 +40,17 @@ newest tagged release.
 
 ```bash
 fly launch --copy-config
-fly secrets set CLAVENAR_LITE_UPSTREAM_URL=https://api.openai.com/v1/chat/completions
+fly volumes create clavenar_lite_data --region iad --size 1
+fly secrets set \
+  CLAVENAR_LITE_TOKEN='<at-least-32-byte-agent-token>' \
+  CLAVENAR_LITE_DECIDE_TOKEN='<different-at-least-32-byte-operator-token>' \
+  CLAVENAR_LITE_UPSTREAM_URL='https://mcp.your-company.com/rpc'
 fly deploy
 ```
+
+The Fly template intentionally refuses startup until those values replace its
+placeholder. The upstream must speak MCP JSON-RPC 2.0; an OpenAI
+chat-completions endpoint is not wire-compatible.
 
 **Static binary** (no Rust toolchain, no docker):
 
@@ -52,7 +59,7 @@ V=0.7.0
 curl -fsSL "https://github.com/clavenar/clavenar-lite/releases/download/v${V}/clavenar-lite-${V}-x86_64-linux-musl.tar.gz" \
   | tar -xz
 ./clavenar-lite start --mode observe \
-  --upstream https://api.openai.com/v1/chat/completions
+  --upstream https://mcp.your-company.com/rpc
 ```
 
 Linux x86_64, fully static (musl) — no glibc dependency, no system
@@ -129,18 +136,20 @@ edition runs verbatim under Lite.
 
 ## Promoting to production
 
-For real traffic, layer these on top of the default deploy:
+For an internet-hosted process, select
+`CLAVENAR_LITE_DEPLOYMENT_PROFILE=hosted`. The binary then enforces the
+following controls at startup; an unsafe combination exits before binding:
 
-- **Persistent ledger.** Mount a volume at `/var/lib/clavenar-lite` and
-  set `CLAVENAR_LITE_LEDGER=/var/lib/clavenar-lite/ledger.db`. The hash
-  chain survives restarts; `clavenar-lite verify` keeps validating.
+- **Persistent ledger.** Mount a volume at `/data` and set
+  `CLAVENAR_LITE_LEDGER=/data/clavenar-lite.db`. In-memory, relative,
+  temporary, and non-mounted hosted paths are rejected.
 - **Custom policies.** Bind-mount your own Rego directory at
   `/etc/clavenar-lite/policies` (or any path you prefer with
   `CLAVENAR_LITE_POLICY_DIR`). The bundled `governance.rego` is a
   starting baseline, not a finished policy.
 - **Ingress auth.** Set `CLAVENAR_LITE_TOKEN`; partners then send
   `Authorization: Bearer <token>` and unauthenticated requests get
-  401. Without it the proxy accepts every connection.
+  401. Hosted tokens must be at least 32 bytes.
 - **Multi-agent.** Set
   `CLAVENAR_LITE_AGENTS=acme/agent-a:tok-a,globex/agent-b:tok-b`
   to front N agents from one binary. Each token gets its own
@@ -148,15 +157,17 @@ For real traffic, layer these on top of the default deploy:
   `tenant` and `agent_id` fields while rate, velocity, pin, and pending
   access use the canonical `tenant/agent` identity. Bare `agent:token`
   entries are rejected; use the explicit single-user `CLAVENAR_LITE_TOKEN`
-  compatibility path when no tenant registry exists. Mutually exclusive with the
-  single-agent `CLAVENAR_LITE_TOKEN`; both being set picks the
-  registry. Tokens must be unique across agents.
+  compatibility path when no tenant registry exists. Hosted startup requires
+  exactly one of `CLAVENAR_LITE_TOKEN` or `CLAVENAR_LITE_AGENTS`; ambiguity,
+  empty entries, short tokens, and duplicates fail closed.
 - **Multi-operator.** Set
   `CLAVENAR_LITE_DECIDERS=acme:op-a,globex:op-b`. Pending list and
   decision routes derive the tenant from the matched token, return only
   that tenant's rows, and make foreign identifiers indistinguishable from
   unknown ones. This registry takes precedence over the explicit
-  single-user `CLAVENAR_LITE_DECIDE_TOKEN` compatibility path.
+  single-user `CLAVENAR_LITE_DECIDE_TOKEN` compatibility path. Hosted startup
+  requires exactly one operator registry and rejects every credential shared
+  with an agent registry.
 - **Async-HIL webhooks.** Set
   `CLAVENAR_LITE_CALLBACK_ALLOWLIST=https://my-app.example.com/hil`
   (comma-separated normalized URL boundaries) to enable agent-supplied callback
@@ -187,13 +198,21 @@ For real traffic, layer these on top of the default deploy:
 - **Upstream creds.** `CLAVENAR_LITE_UPSTREAM_API_KEY` injects the key
   into forwarded requests so your agent never sees it. Same shape
   as the full edition's Vault injection, minus Vault.
-- **Enforce mode.** Flip `CLAVENAR_LITE_MODE=enforce` once the observe
-  data is clean.
+- **Compatible bounded upstream.** Hosted mode requires
+  `CLAVENAR_LITE_UPSTREAM_ADAPTER=mcp-jsonrpc-v1`, a non-placeholder HTTPS
+  upstream, and a timeout no greater than 30 seconds. The adapter caps each
+  request and response at 1 MiB, requires JSON content and JSON-RPC 2.0, and
+  binds the response ID exactly to the request ID.
+- **Enforce and rate bounds.** Hosted mode requires `enforce`, verbose
+  verdicts off, QPS within 0.1–100, and burst within 1–200. The Fly template
+  fixes 10 QPS/20 burst and keeps at least one machine running.
 
 ## Subcommands
 
 ```
 clavenar-lite start [--port N] [--upstream URL] [--policies DIR] [--ledger PATH]
+                  [--deployment-profile developer|hosted]
+                  [--upstream-adapter raw-json|mcp-jsonrpc-v1]
                   [--velocity-window SECS] [--token TOKEN] [--agents SPEC]
                   [--decide-token TOKEN] [--deciders SPEC] [--upstream-api-key KEY]
                   [--upstream-timeout-secs SECS] [--slack-webhook-url URL]
@@ -224,6 +243,8 @@ Every flag falls back to a `CLAVENAR_LITE_*` env var:
 |----------------------------|--------------------------------------|---------------------------|
 | `--port`                   | `CLAVENAR_LITE_PORT`                   | 8088                      |
 | `--upstream`               | `CLAVENAR_LITE_UPSTREAM_URL`           | http://localhost:9000/mcp |
+| `--deployment-profile`     | `CLAVENAR_LITE_DEPLOYMENT_PROFILE`     | `developer`               |
+| `--upstream-adapter`       | `CLAVENAR_LITE_UPSTREAM_ADAPTER`       | `raw-json`                |
 | `--policies`               | `CLAVENAR_LITE_POLICY_DIR`             | ./policies                |
 | `--ledger`                 | `CLAVENAR_LITE_LEDGER`                 | ./clavenar-lite.db          |
 | `--velocity-window`        | `CLAVENAR_LITE_VELOCITY_WINDOW_SECS`   | 60                        |

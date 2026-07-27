@@ -7,9 +7,8 @@
 #
 # Built artifact runs on port 8088 by default; mount a policy
 # directory or use the bundled governance.rego baseline. SQLite
-# ledger defaults to :memory: so the container is stateless out of
-# the box — set CLAVENAR_LITE_LEDGER=/var/lib/clavenar-lite/ledger.db and
-# bind-mount a volume for persistence.
+# The developer profile remains stateless by default. Hosted templates select
+# the fail-closed hosted profile and must mount durable `/data` state.
 
 # ---------- builder ----------
 FROM rust:1-bookworm@sha256:8fa55b2f3ddf97471ab6a767bfa3f37e6bad0986ba823e75fea57e2a2a5c3073 AS builder
@@ -50,12 +49,10 @@ USER 65532:65532
 # or `docker run -e CLAVENAR_LITE_UPSTREAM_URL=...` works without an
 # argv override. CLI flags still win when passed.
 #
-# CLAVENAR_LITE_MODE defaults to observe so a bare
+# The image's developer profile defaults to observe so a bare
 # `docker run ghcr.io/clavenar/clavenar-lite:latest` boots without
-# 403-ing the first request — the 60-second-deploy promise in the
-# README. fly.toml and the static-binary snippet also default to
-# observe; flip to enforce via `fly secrets set` / `docker run -e` /
-# `--mode enforce` once verdicts are trustworthy.
+# 403-ing the first request. `fly.toml` explicitly selects the hosted profile,
+# enforce mode, bounded rates, durable state, and the MCP JSON-RPC adapter.
 ENV CLAVENAR_LITE_PORT=8088 \
     CLAVENAR_LITE_POLICY_DIR=/etc/clavenar-lite/policies \
     CLAVENAR_LITE_LEDGER=:memory: \

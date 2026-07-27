@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://specs.clavenar.com/contracts/hosted-lite-safety-v1.schema.json",
+  "title": "Clavenar hosted Lite safety v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "contract",
+    "feature",
+    "profiles",
+    "authentication",
+    "posture",
+    "rateLimit",
+    "durability",
+    "adapter",
+    "hostedTemplate",
+    "production"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "contract": { "const": "clavenar.hosted-lite-safety/v1" },
+    "feature": { "const": "WP-13.6" },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["developer", "hosted"],
+      "properties": {
+        "developer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["default", "unsafeHostedUse"],
+          "properties": {
+            "default": { "const": true },
+            "unsafeHostedUse": { "const": false }
+          }
+        },
+        "hosted": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["selection", "environment", "startupRefusal"],
+          "properties": {
+            "selection": { "const": "explicit" },
+            "environment": {
+              "const": "CLAVENAR_LITE_DEPLOYMENT_PROFILE=hosted"
+            },
+            "startupRefusal": { "const": true }
+          }
+        }
+      }
+    },
+    "authentication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agentRegistry",
+        "operatorRegistry",
+        "minimumTokenBytes",
+        "emptyEntries",
+        "agentOperatorOverlap",
+        "anonymousMcp",
+        "anonymousPendingRead",
+        "anonymousDecision"
+      ],
+      "properties": {
+        "agentRegistry": { "const": "exactly-one-of-token-or-agents" },
+        "operatorRegistry": {
+          "const": "exactly-one-of-decide-token-or-deciders"
+        },
+        "minimumTokenBytes": { "const": 32 },
+        "emptyEntries": { "const": "reject" },
+        "agentOperatorOverlap": { "const": "reject-constant-time" },
+        "anonymousMcp": { "const": false },
+        "anonymousPendingRead": { "const": false },
+        "anonymousDecision": { "const": false }
+      }
+    },
+    "posture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "verboseVerdicts", "callbackEmptyAllowlist"],
+      "properties": {
+        "mode": { "const": "enforce" },
+        "verboseVerdicts": { "const": false },
+        "callbackEmptyAllowlist": { "const": "deny" }
+      }
+    },
+    "rateLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "scope",
+        "minimumQps",
+        "maximumQps",
+        "minimumBurst",
+        "maximumBurst",
+        "beforePipeline",
+        "denialStatus",
+        "denialLedgerRow"
+      ],
+      "properties": {
+        "required": { "const": true },
+        "scope": { "const": "tenant-agent" },
+        "minimumQps": { "const": 0.1 },
+        "maximumQps": { "const": 100.0 },
+        "minimumBurst": { "const": 1 },
+        "maximumBurst": { "const": 200 },
+        "beforePipeline": { "const": true },
+        "denialStatus": { "const": 429 },
+        "denialLedgerRow": { "const": true }
+      }
+    },
+    "durability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ledger",
+        "reject",
+        "requiredState",
+        "hostedMount",
+        "scaleToZero",
+        "minimumMachines",
+        "restartVerification"
+      ],
+      "properties": {
+        "ledger": { "const": "absolute-file-backed-sqlite" },
+        "reject": {
+          "const": ["memory", "relative-path", "temporary-path"]
+        },
+        "requiredState": {
+          "const": [
+            "hash-chain",
+            "pending",
+            "decision",
+            "server-execution"
+          ]
+        },
+        "hostedMount": { "const": "/data" },
+        "scaleToZero": { "const": false },
+        "minimumMachines": { "const": 1 },
+        "restartVerification": { "const": true }
+      }
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "identifier",
+        "upstreamScheme",
+        "placeholderHosts",
+        "requestContentType",
+        "responseContentType",
+        "jsonRpcVersion",
+        "responseId",
+        "requestBodyBytes",
+        "responseBodyBytes",
+        "wholeOperationMillis",
+        "automaticEffectRetries",
+        "overflow"
+      ],
+      "properties": {
+        "required": { "const": true },
+        "identifier": { "const": "mcp-jsonrpc-v1" },
+        "upstreamScheme": { "const": "https" },
+        "placeholderHosts": { "const": "reject" },
+        "requestContentType": { "const": "application/json" },
+        "responseContentType": { "const": "application/json" },
+        "jsonRpcVersion": { "const": "2.0" },
+        "responseId": { "const": "exact-request-id" },
+        "requestBodyBytes": { "const": 1048576 },
+        "responseBodyBytes": { "const": 1048576 },
+        "wholeOperationMillis": { "const": 30000 },
+        "automaticEffectRetries": { "const": 0 },
+        "overflow": { "const": "abort-and-fail" }
+      }
+    },
+    "hostedTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileSelected",
+        "persistentVolume",
+        "enforceMode",
+        "boundedRateLimit",
+        "boundedUpstream",
+        "compatibleAdapter",
+        "secretsRequiredBeforeReady"
+      ],
+      "properties": {
+        "profileSelected": { "const": true },
+        "persistentVolume": { "const": true },
+        "enforceMode": { "const": true },
+        "boundedRateLimit": { "const": true },
+        "boundedUpstream": { "const": true },
+        "compatibleAdapter": { "const": true },
+        "secretsRequiredBeforeReady": {
+          "const": ["agent-auth", "operator-auth", "upstream-url"]
+        }
+      }
+    },
+    "production": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["execIncluded", "execOptInAllowed"],
+      "properties": {
+        "execIncluded": { "const": false },
+        "execOptInAllowed": { "const": false }
+      }
+    }
+  }
+}

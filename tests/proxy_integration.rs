@@ -20,6 +20,7 @@ use axum::{Router, extract::State, routing::post};
 use clavenar_lite::ledger::{Ledger, ParkRequest};
 use clavenar_lite::policy::PolicyEngine;
 use clavenar_lite::proxy::{AgentRegistry, AppState, ClavenarMode, TenantRegistry, build_router};
+use clavenar_lite::upstream_adapter::UpstreamAdapter;
 
 trait DecisionRequestExt {
     fn decision_post<U: reqwest::IntoUrl>(&self, url: U) -> reqwest::RequestBuilder;
@@ -301,6 +302,7 @@ async fn spawn_lite_with_slack(
         ledger: ledger.clone(),
         tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url,
+        upstream_adapter: UpstreamAdapter::RawJson,
         http: reqwest::Client::new(),
         agents,
         deciders: None,
@@ -334,6 +336,7 @@ async fn spawn_lite_verbose(upstream_url: String) -> (SocketAddr, Arc<Ledger>) {
         ledger: ledger.clone(),
         tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url,
+        upstream_adapter: UpstreamAdapter::RawJson,
         http: reqwest::Client::new(),
         agents: None,
         deciders: None,
@@ -1442,6 +1445,7 @@ async fn tenant_tokens_confine_lite_list_poll_and_decide_routes() {
         ledger: ledger.clone(),
         tool_pins: Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url: format!("http://{upstream}/mcp"),
+        upstream_adapter: UpstreamAdapter::RawJson,
         http: reqwest::Client::new(),
         agents: Some(AgentRegistry::parse("acme/bot:agent-a,globex/bot:agent-b").unwrap()),
         deciders: Some(TenantRegistry::parse("acme:operator-a,globex:operator-b").unwrap()),
@@ -1649,6 +1653,7 @@ async fn spawn_lite_with_registry(
         ledger: ledger.clone(),
         tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url,
+        upstream_adapter: UpstreamAdapter::RawJson,
         http: reqwest::Client::new(),
         agents: Some(registry),
         deciders: None,
@@ -1757,6 +1762,7 @@ async fn spawn_lite_with_callbacks_and_http(
         ledger: ledger.clone(),
         tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url,
+        upstream_adapter: UpstreamAdapter::RawJson,
         http,
         agents: None,
         deciders: None,
@@ -1944,6 +1950,7 @@ async fn spawn_lite_with_webhook(
         ledger: ledger.clone(),
         tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url,
+        upstream_adapter: UpstreamAdapter::RawJson,
         http: reqwest::Client::new(),
         agents: Some(AgentRegistry::single("test-token".to_string())),
         deciders: None,
@@ -2160,6 +2167,7 @@ async fn rate_limit_gate_emits_429_with_json_body_and_ledger_row() {
         ledger: ledger.clone(),
         tool_pins: std::sync::Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
         upstream_url: format!("http://{}/mcp", upstream),
+        upstream_adapter: UpstreamAdapter::RawJson,
         http: reqwest::Client::new(),
         agents,
         deciders: None,
@@ -2219,4 +2227,225 @@ async fn rate_limit_gate_emits_429_with_json_body_and_ledger_row() {
         .expect("ledger should carry a row matching the 429's correlation_id");
     assert_eq!(rl_row.intent_category, "RateLimitDenied");
     assert!(!rl_row.authorized);
+}
+
+async fn spawn_jsonrpc_upstream() -> (SocketAddr, Arc<AtomicUsize>) {
+    let effects = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&effects);
+    let app = Router::new().route(
+        "/mcp",
+        post(move |body: axum::body::Bytes| {
+            let counted = Arc::clone(&counted);
+            async move {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                axum::Json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {"ok": true}
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (address, effects)
+}
+
+async fn spawn_durable_adapter_lite(
+    upstream: SocketAddr,
+    ledger_path: &str,
+) -> (
+    SocketAddr,
+    Arc<Ledger>,
+    tokio::task::JoinHandle<Result<(), std::io::Error>>,
+) {
+    use clavenar_lite::rate_limit::{RateLimitConfig, RateLimiter};
+
+    const AGENT_TOKEN: &str = "agent-token-0123456789abcdef0123456789abcdef";
+    const OPERATOR_TOKEN: &str = "operator-token-0123456789abcdef0123456789abcdef";
+
+    let policy = Arc::new(PolicyEngine::from_dir(&policies_dir(), 60).unwrap());
+    let ledger = Arc::new(Ledger::open(ledger_path).unwrap());
+    let limiter = RateLimiter::from_config(RateLimitConfig { qps: 0.1, burst: 2 }).map(Arc::new);
+    let state = Arc::new(AppState {
+        policy,
+        ledger: Arc::clone(&ledger),
+        tool_pins: Arc::new(clavenar_lite::supply_chain::ToolPinStore::new()),
+        upstream_url: format!("http://{upstream}/mcp"),
+        upstream_adapter: UpstreamAdapter::McpJsonRpcV1,
+        http: reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap(),
+        agents: Some(AgentRegistry::single(AGENT_TOKEN.to_string())),
+        deciders: None,
+        decide_token: Some(OPERATOR_TOKEN.to_string()),
+        upstream_api_key: None,
+        mode: ClavenarMode::Enforce,
+        slack_webhook_url: None,
+        callback_allowlist: Vec::new(),
+        webhook_url: None,
+        rate_limiter: limiter,
+        verbose_verdicts: false,
+    });
+    let app = build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, app).await });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    (address, ledger, task)
+}
+
+#[tokio::test]
+async fn hosted_adapter_state_survives_restart_and_rate_denial_has_no_effect() {
+    const AGENT_TOKEN: &str = "agent-token-0123456789abcdef0123456789abcdef";
+    const OPERATOR_TOKEN: &str = "operator-token-0123456789abcdef0123456789abcdef";
+    const EXECUTION_ID: &str = "d8de0209-5ffd-4b9a-991c-774f6a85db2c";
+
+    let (upstream, effects) = spawn_jsonrpc_upstream().await;
+    let directory = tempfile::tempdir().unwrap();
+    let ledger_path = directory.path().join("hosted-lite.db");
+    let ledger_path = ledger_path.to_str().unwrap();
+    let (first_address, first_ledger, first_task) =
+        spawn_durable_adapter_lite(upstream, ledger_path).await;
+    let client = reqwest::Client::new();
+    let allowed_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": EXECUTION_ID,
+        "method": "call_tool",
+        "params": {"name": "search", "arguments": {"q": "hosted adapter"}}
+    });
+    let allowed = client
+        .post(format!("http://{first_address}/mcp"))
+        .bearer_auth(AGENT_TOKEN)
+        .header(
+            "x-clavenar-server-execution-contract",
+            "clavenar.server-execution/v1",
+        )
+        .header("x-clavenar-idempotency-id", EXECUTION_ID)
+        .json(&allowed_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        allowed.json::<serde_json::Value>().await.unwrap()["result"]["ok"],
+        true
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+
+    let pending_id = "8b9211a5-f3a6-42df-8f3d-1e8e0a343838";
+    let pending = client
+        .post(format!("http://{first_address}/mcp"))
+        .bearer_auth(AGENT_TOKEN)
+        .header("x-clavenar-decision-contract", "clavenar.decision/v1")
+        .header("x-clavenar-idempotency-id", pending_id)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": pending_id,
+            "method": "call_tool",
+            "params": {
+                "name": "wire_transfer",
+                "arguments": {"to": "acct-1", "amount": 100}
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pending.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(
+        pending.json::<serde_json::Value>().await.unwrap()["pending_id"],
+        pending_id
+    );
+
+    let throttled_id = "709ab289-0535-4f5a-9703-c4ec4bedc76f";
+    let throttled = client
+        .post(format!("http://{first_address}/mcp"))
+        .bearer_auth(AGENT_TOKEN)
+        .header(
+            "x-clavenar-server-execution-contract",
+            "clavenar.server-execution/v1",
+        )
+        .header("x-clavenar-idempotency-id", throttled_id)
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": throttled_id,
+            "method": "call_tool",
+            "params": {"name": "search", "arguments": {"q": "must not execute"}}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(throttled.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+    assert!(first_ledger.verify().await.unwrap().valid);
+
+    first_task.abort();
+    let _ = first_task.await;
+    drop(first_ledger);
+
+    let (second_address, second_ledger, second_task) =
+        spawn_durable_adapter_lite(upstream, ledger_path).await;
+    let replay = client
+        .post(format!("http://{second_address}/mcp"))
+        .bearer_auth(AGENT_TOKEN)
+        .header(
+            "x-clavenar-server-execution-contract",
+            "clavenar.server-execution/v1",
+        )
+        .header("x-clavenar-idempotency-id", EXECUTION_ID)
+        .json(&allowed_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        replay
+            .headers()
+            .get("x-clavenar-server-execution-replayed")
+            .unwrap(),
+        "true"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 1);
+
+    let retained = client
+        .get(format!("http://{second_address}/pending/{pending_id}"))
+        .bearer_auth(AGENT_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retained.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        retained.json::<serde_json::Value>().await.unwrap()["decision"],
+        serde_json::Value::Null
+    );
+
+    let decided = client
+        .post(format!(
+            "http://{second_address}/pending/{pending_id}/decide"
+        ))
+        .bearer_auth(OPERATOR_TOKEN)
+        .json(&serde_json::json!({"decision": "allow", "note": "restart proof"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(decided.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        second_ledger
+            .get_pending(pending_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .decision
+            .as_deref(),
+        Some("allow")
+    );
+    assert!(second_ledger.verify().await.unwrap().valid);
+    second_task.abort();
+    let _ = second_task.await;
 }
