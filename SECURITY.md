@@ -2,8 +2,8 @@
 
 <!-- clavenar-security-policy:v1 -->
 
-**Policy version:** 1.0.0  
-**Effective date:** 2026-07-27  
+**Policy version:** 1.0.0
+**Effective date:** 2026-07-27
 **Canonical contact:** **vanteguardlabs@gmail.com**
 
 This is the canonical vulnerability-disclosure policy for every repository in
