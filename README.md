@@ -55,16 +55,17 @@ chat-completions endpoint is not wire-compatible.
 **Static binary** (no Rust toolchain, no docker):
 
 ```bash
-V=0.12.0
-curl -fsSL "https://github.com/clavenar/clavenar-lite/releases/download/v${V}/clavenar-lite-${V}-x86_64-linux-musl.tar.gz" \
-  | tar -xz
+curl -fsSLO https://github.com/clavenar/clavenar-lite/releases/download/v0.12.0/clavenar-lite-0.12.0-x86_64-linux-musl.tar.gz
+curl -fsSLO https://github.com/clavenar/clavenar-lite/releases/download/v0.12.0/clavenar-lite-0.12.0-x86_64-linux-musl.tar.gz.sha256
+sha256sum -c clavenar-lite-0.12.0-x86_64-linux-musl.tar.gz.sha256
+tar -xzf clavenar-lite-0.12.0-x86_64-linux-musl.tar.gz
 ./clavenar-lite start --mode observe \
   --upstream https://mcp.your-company.com/rpc
 ```
 
 Linux x86_64, fully static (musl) — no glibc dependency, no system
-libsqlite. A `.sha256` companion file is published alongside if you
-want to verify before extracting.
+libsqlite. The mandatory companion checksum verifies the archive before
+extraction.
 
 Hit it once to confirm:
 
