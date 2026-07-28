@@ -12,6 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
+      - name: Isolate Rust toolchain state
+        run: |
+          echo "CARGO_HOME=${{ runner.temp }}/cargo-home" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${{ runner.temp }}/rustup-home" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: 1.97.0
@@ -64,6 +69,15 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Isolate Rust toolchain state
+        run: |
+          echo "CARGO_HOME=${{ runner.temp }}/cargo-home" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=${{ runner.temp }}/rustup-home" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.97.0
 
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
