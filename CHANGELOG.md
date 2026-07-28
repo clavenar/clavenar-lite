@@ -6,6 +6,13 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-07-28
+
+### Changed
+
+- Bind the exact external-install documentation to a new immutable source tag,
+  static asset set, and multi-architecture image tag.
+
 ## [0.12.0] - 2026-07-27
 
 ### Security

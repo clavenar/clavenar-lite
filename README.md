@@ -28,7 +28,7 @@ the developer profile; hosted templates use a separate fail-closed posture.
 docker run -p 8088:8088 \
   -e CLAVENAR_LITE_UPSTREAM_URL=https://mcp.your-company.com/rpc \
   -e CLAVENAR_LITE_MODE=observe \
-  ghcr.io/clavenar/clavenar-lite:0.12.0
+  ghcr.io/clavenar/clavenar-lite:0.12.1
 ```
 
 The image is multi-arch (`linux/amd64` + `linux/arm64`) and published only
@@ -55,10 +55,10 @@ chat-completions endpoint is not wire-compatible.
 **Static binary** (no Rust toolchain, no docker):
 
 ```bash
-curl -fsSLO https://github.com/clavenar/clavenar-lite/releases/download/v0.12.0/clavenar-lite-0.12.0-x86_64-linux-musl.tar.gz
-curl -fsSLO https://github.com/clavenar/clavenar-lite/releases/download/v0.12.0/clavenar-lite-0.12.0-x86_64-linux-musl.tar.gz.sha256
-sha256sum -c clavenar-lite-0.12.0-x86_64-linux-musl.tar.gz.sha256
-tar -xzf clavenar-lite-0.12.0-x86_64-linux-musl.tar.gz
+curl -fsSLO https://github.com/clavenar/clavenar-lite/releases/download/v0.12.1/clavenar-lite-0.12.1-x86_64-linux-musl.tar.gz
+curl -fsSLO https://github.com/clavenar/clavenar-lite/releases/download/v0.12.1/clavenar-lite-0.12.1-x86_64-linux-musl.tar.gz.sha256
+sha256sum -c clavenar-lite-0.12.1-x86_64-linux-musl.tar.gz.sha256
+tar -xzf clavenar-lite-0.12.1-x86_64-linux-musl.tar.gz
 ./clavenar-lite start --mode observe \
   --upstream https://mcp.your-company.com/rpc
 ```
