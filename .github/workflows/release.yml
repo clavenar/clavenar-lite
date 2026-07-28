@@ -27,8 +27,8 @@ jobs:
 
       - name: Isolate Rust toolchain state
         run: |
-          echo "CARGO_HOME=${{ runner.temp }}/cargo-home" >> "$GITHUB_ENV"
-          echo "RUSTUP_HOME=${{ runner.temp }}/rustup-home" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$RUNNER_TEMP/cargo-home-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$RUNNER_TEMP/rustup-home-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB" >> "$GITHUB_ENV"
 
       - name: Verify protected publication input
         id: ver
