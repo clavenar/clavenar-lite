@@ -137,15 +137,14 @@ jobs:
               --jq '.object.sha')" = "$SOURCE_SHA"
             gh release upload "$tag" "$asset" "${asset}.sha256" --clobber
           else
-            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
-              test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" \
-                --jq '.object.sha')" = "$SOURCE_SHA"
+            existing="$(git ls-remote --refs origin "refs/tags/$tag" |
+              awk '{print $1}')"
+            if [ -n "$existing" ]; then
+              test "$existing" = "$SOURCE_SHA"
             else
-              gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-                -f ref="refs/tags/$tag" \
-                -f sha="$SOURCE_SHA" >/dev/null
+              git push origin "$SOURCE_SHA:refs/tags/$tag"
             fi
-            gh release create "$tag" \
+            gh release create "$tag" --verify-tag \
               --title "$tag — clavenar-lite" \
               --notes-file release-notes.md \
               "$asset" \
