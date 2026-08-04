@@ -12,18 +12,19 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - name: Isolate job and Rust toolchain state
+      - name: Prepare isolated Rust toolchain state
         run: |
           suffix="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
           job_home="$RUNNER_TEMP/home-$suffix"
           install -d -m 0700 "$job_home"
           {
-            echo "HOME=$job_home"
             echo "CARGO_HOME=$RUNNER_TEMP/cargo-home-$suffix"
             echo "RUSTUP_HOME=$RUNNER_TEMP/rustup-home-$suffix"
           } >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        env:
+          HOME: ${{ runner.temp }}/home-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         with:
           toolchain: 1.97.0
           components: rustfmt, clippy
@@ -76,18 +77,19 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
-      - name: Isolate job and Rust toolchain state
+      - name: Prepare isolated Rust toolchain state
         run: |
           suffix="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
           job_home="$RUNNER_TEMP/home-$suffix"
           install -d -m 0700 "$job_home"
           {
-            echo "HOME=$job_home"
             echo "CARGO_HOME=$RUNNER_TEMP/cargo-home-$suffix"
             echo "RUSTUP_HOME=$RUNNER_TEMP/rustup-home-$suffix"
           } >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        env:
+          HOME: ${{ runner.temp }}/home-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         with:
           toolchain: 1.97.0
 

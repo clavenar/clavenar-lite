@@ -25,13 +25,12 @@ jobs:
         with:
           ref: ${{ github.event.client_payload.source_sha }}
 
-      - name: Isolate job and Rust toolchain state
+      - name: Prepare isolated Rust toolchain state
         run: |
           suffix="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
           job_home="$RUNNER_TEMP/home-$suffix"
           install -d -m 0700 "$job_home"
           {
-            echo "HOME=$job_home"
             echo "CARGO_HOME=$RUNNER_TEMP/cargo-home-$suffix"
             echo "RUSTUP_HOME=$RUNNER_TEMP/rustup-home-$suffix"
           } >> "$GITHUB_ENV"
@@ -55,6 +54,8 @@ jobs:
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        env:
+          HOME: ${{ runner.temp }}/home-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         with:
           toolchain: 1.97.0
           targets: x86_64-unknown-linux-musl
