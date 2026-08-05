@@ -48,7 +48,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::heuristics::{self, HeuristicVerdict};
@@ -72,6 +74,40 @@ const DECISION_CONTRACT: &str = "clavenar.decision/v1";
 const CLIENT_MIGRATION_CONTRACT: &str = "clavenar.client-migration/v1";
 const CLIENT_MIGRATION_GUIDE: &str = "https://clavenar.com/docs/sdk-migration/";
 const PENDING_AUTHORIZATION_CONTRACT: &str = "clavenar.pending-authorization/v1";
+const MAX_IN_FLIGHT_NOTIFICATIONS: usize = 32;
+static NOTIFICATION_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn spawn_notification<F>(kind: &'static str, future: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let permits = Arc::clone(
+        NOTIFICATION_PERMITS.get_or_init(|| Arc::new(Semaphore::new(MAX_IN_FLIGHT_NOTIFICATIONS))),
+    );
+    let Ok(permit) = permits.try_acquire_owned() else {
+        metrics::counter!(
+            "clavenar_lite_notification_total",
+            "kind" => kind,
+            "outcome" => "dropped"
+        )
+        .increment(1);
+        tracing::warn!(
+            kind,
+            "notification concurrency limit reached; dropping best-effort event"
+        );
+        return;
+    };
+    metrics::counter!(
+        "clavenar_lite_notification_total",
+        "kind" => kind,
+        "outcome" => "started"
+    )
+    .increment(1);
+    tokio::spawn(async move {
+        let _permit = permit;
+        future.await;
+    });
+}
 
 #[derive(Clone, Copy, Debug)]
 struct ServerExecutionRequest {
@@ -1143,7 +1179,7 @@ async fn handle_decide_pending(
             decided.decider_note.clone(),
             decided.decided_at.map(|t| t.to_rfc3339()),
         );
-        tokio::spawn(async move {
+        spawn_notification("callback", async move {
             let (corr, decision, note, ts) = &body_owned;
             fire_callback(
                 url,
@@ -1257,7 +1293,7 @@ fn maybe_fire_webhook(state: &AppState, event: WebhookEvent<'_>) {
     };
     let http = state.http.clone();
     let url = url.to_string();
-    tokio::spawn(async move {
+    spawn_notification("verdict_webhook", async move {
         webhook::fire_event(http, url, body).await;
     });
 }
@@ -1697,7 +1733,7 @@ async fn handle_mcp(
             if let Some(url) = &state.slack_webhook_url {
                 let http = state.http.clone();
                 let url = url.clone();
-                tokio::spawn(async move {
+                spawn_notification("slack", async move {
                     crate::slack::notify_pending_parked(&http, &url, &parked).await;
                 });
             }

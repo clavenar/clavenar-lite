@@ -8,11 +8,10 @@
 //! ingest pipelines can index every verdict without parsing human
 //! prose.
 //!
-//! Fire-and-forget by design: every emission is spawned onto the
-//! tokio runtime by the caller, with a hard 5-second per-request
-//! timeout. A wedged or slow sink never delays the agent's response
-//! or the operator's decide ack. The ledger remains the durable
-//! source of truth; the webhook is observability, not a write path.
+//! Fire-and-forget by design: the proxy admits emissions through a bounded
+//! concurrency gate and applies a hard 5-second per-request timeout. A wedged
+//! sink never delays the agent response or creates an unbounded task backlog.
+//! The ledger remains the durable source of truth.
 //!
 //! Wire shape is stable v1: SIEM queries grep on these JSON keys, so
 //! field renames are a breaking change. New fields can be added; old

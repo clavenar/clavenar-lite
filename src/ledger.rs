@@ -31,8 +31,8 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 pub const GENESIS_PREV_HASH: &str =
@@ -270,7 +270,15 @@ impl From<rusqlite::Error> for DecideError {
 
 pub struct Ledger {
     conn: Arc<Mutex<Connection>>,
+    worker_permit: Arc<Semaphore>,
     instance_id: String,
+}
+
+fn sqlite_worker_error(message: &str) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ABORT),
+        Some(message.to_string()),
+    )
 }
 
 impl Ledger {
@@ -288,8 +296,49 @@ impl Ledger {
         init_schema(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            // SQLite is single-writer here. Admit only one blocking operation
+            // at a time so bursts wait asynchronously instead of filling
+            // Tokio's blocking pool with mutex waiters.
+            worker_permit: Arc::new(Semaphore::new(1)),
             instance_id: Uuid::new_v4().to_string(),
         })
+    }
+
+    async fn with_connection<T, F>(&self, operation: F) -> rusqlite::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> rusqlite::Result<T> + Send + 'static,
+    {
+        self.with_connection_result(operation).await
+    }
+
+    async fn with_connection_result<T, E, F>(&self, operation: F) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: From<rusqlite::Error> + Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, E> + Send + 'static,
+    {
+        let queued_at = std::time::Instant::now();
+        let permit = Arc::clone(&self.worker_permit)
+            .acquire_owned()
+            .await
+            .map_err(|_| E::from(sqlite_worker_error("ledger worker is unavailable")))?;
+        metrics::histogram!("clavenar_lite_ledger_queue_seconds")
+            .record(queued_at.elapsed().as_secs_f64());
+        let connection = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut connection = connection
+                .lock()
+                .map_err(|_| E::from(sqlite_worker_error("ledger connection lock is poisoned")))?;
+            operation(&mut connection)
+        })
+        .await
+        .map_err(|error| {
+            E::from(sqlite_worker_error(&format!(
+                "ledger worker failed: {error}"
+            )))
+        })?
     }
 
     /// Online backup of the live ledger to `dest_path` using SQLite's
@@ -302,19 +351,18 @@ impl Ledger {
     /// stand-alone SQLite DB ready to be opened with `Ledger::open`;
     /// if the file exists at `dest_path` it is overwritten.
     pub async fn backup_to(&self, dest_path: &str) -> rusqlite::Result<i32> {
-        // Overwrite any pre-existing file so a stale snapshot doesn't
-        // contaminate the new one. Backup::run_to_completion handles
-        // the chunking + busy retry loop internally.
-        let _ = std::fs::remove_file(dest_path);
-        let src = self.conn.lock().await;
-        let mut dst = Connection::open(dest_path)?;
-        let backup = rusqlite::backup::Backup::new(&src, &mut dst)?;
-        // 50-page chunks, 50ms sleep between busy retries. Returns
-        // `Ok(())` when the copy finishes; the page count is read off
-        // the progress handle.
-        backup.run_to_completion(50, std::time::Duration::from_millis(50), None)?;
-        let pages = backup.progress().pagecount;
-        Ok(pages)
+        let dest_path = dest_path.to_string();
+        self.with_connection(move |src| {
+            // Overwrite any pre-existing file so a stale snapshot doesn't
+            // contaminate the new one. Backup::run_to_completion handles
+            // the chunking + busy retry loop internally.
+            let _ = std::fs::remove_file(&dest_path);
+            let mut dst = Connection::open(&dest_path)?;
+            let backup = rusqlite::backup::Backup::new(src, &mut dst)?;
+            backup.run_to_completion(50, std::time::Duration::from_millis(50), None)?;
+            Ok(backup.progress().pagecount)
+        })
+        .await
     }
 
     /// Append one entry. Reads the latest seq + entry_hash, computes the
@@ -322,8 +370,8 @@ impl Ledger {
     /// fully-populated entry. Same algorithm as
     /// `clavenar_ledger::append_entry`.
     pub async fn append(&self, req: LogRequest) -> rusqlite::Result<LedgerEntry> {
-        let conn = self.conn.lock().await;
-        append_on_connection(&conn, req)
+        self.with_connection(move |conn| append_on_connection(conn, req))
+            .await
     }
 
     /// Read a retained server execution without changing state. Used before
@@ -333,8 +381,9 @@ impl Ledger {
         &self,
         binding: &ServerExecutionBinding,
     ) -> rusqlite::Result<ServerExecutionOutcome> {
-        let conn = self.conn.lock().await;
-        inspect_server_execution(&conn, binding)
+        let binding = binding.clone();
+        self.with_connection(move |conn| inspect_server_execution(conn, &binding))
+            .await
     }
 
     /// Atomically commit exact intent plus the in-flight marker and its first
@@ -343,59 +392,63 @@ impl Ledger {
         &self,
         binding: &ServerExecutionBinding,
     ) -> rusqlite::Result<ServerExecutionOutcome> {
-        let mut conn = self.conn.lock().await;
-        let tx = conn.transaction()?;
-        match inspect_server_execution(&tx, binding)? {
-            ServerExecutionOutcome::Missing => {}
-            outcome => return Ok(outcome),
-        }
-        let execution_id = binding.execution_id();
-        tx.execute(
-            "INSERT INTO server_executions
+        let binding = binding.clone();
+        let instance_id = self.instance_id.clone();
+        self.with_connection(move |conn| {
+            let tx = conn.transaction()?;
+            match inspect_server_execution(&tx, &binding)? {
+                ServerExecutionOutcome::Missing => {}
+                outcome => return Ok(outcome),
+            }
+            let execution_id = binding.execution_id();
+            tx.execute(
+                "INSERT INTO server_executions
              (agent_id, idempotency_id, execution_id, correlation_id, route, method,
               tool_name, submitted_request_sha256, effective_request_sha256, state, created_at,
               reconciliation_state, owner_instance)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'in_flight', ?10,
                      'pending', ?11)",
-            rusqlite::params![
-                binding.agent_id,
-                binding.idempotency_id.to_string(),
-                execution_id.to_string(),
-                binding.correlation_id,
-                binding.route,
-                binding.method,
-                binding.tool_name,
-                binding.submitted_request_sha256,
-                binding.effective_request_sha256,
-                Utc::now().to_rfc3339(),
-                self.instance_id,
-            ],
-        )?;
-        append_on_connection(
-            &tx,
-            LogRequest {
-                agent_id: binding.agent_id.clone(),
-                method: binding.method.clone(),
-                intent_category: "ServerExecutionIntent".to_string(),
-                authorized: false,
-                reasoning: "durable server execution intent committed before upstream attempt"
-                    .to_string(),
-                policy_decision: Some(serde_json::json!({
-                    "contract": "clavenar.server-execution/v1",
-                    "stage": "execution.intent",
-                    "execution_id": execution_id,
-                    "idempotency_id": binding.idempotency_id,
-                    "route": binding.route,
-                    "tool_name": binding.tool_name,
-                    "submitted_request_sha256": binding.submitted_request_sha256,
-                    "effective_request_sha256": binding.effective_request_sha256,
-                    "state": "in_flight",
-                })),
-                correlation_id: Some(binding.correlation_id.clone()),
-            },
-        )?;
-        tx.commit()?;
-        Ok(ServerExecutionOutcome::Started)
+                rusqlite::params![
+                    binding.agent_id,
+                    binding.idempotency_id.to_string(),
+                    execution_id.to_string(),
+                    binding.correlation_id,
+                    binding.route,
+                    binding.method,
+                    binding.tool_name,
+                    binding.submitted_request_sha256,
+                    binding.effective_request_sha256,
+                    Utc::now().to_rfc3339(),
+                    instance_id,
+                ],
+            )?;
+            append_on_connection(
+                &tx,
+                LogRequest {
+                    agent_id: binding.agent_id.clone(),
+                    method: binding.method.clone(),
+                    intent_category: "ServerExecutionIntent".to_string(),
+                    authorized: false,
+                    reasoning: "durable server execution intent committed before upstream attempt"
+                        .to_string(),
+                    policy_decision: Some(serde_json::json!({
+                        "contract": "clavenar.server-execution/v1",
+                        "stage": "execution.intent",
+                        "execution_id": execution_id,
+                        "idempotency_id": binding.idempotency_id,
+                        "route": binding.route,
+                        "tool_name": binding.tool_name,
+                        "submitted_request_sha256": binding.submitted_request_sha256,
+                        "effective_request_sha256": binding.effective_request_sha256,
+                        "state": "in_flight",
+                    })),
+                    correlation_id: Some(binding.correlation_id.clone()),
+                },
+            )?;
+            tx.commit()?;
+            Ok(ServerExecutionOutcome::Started)
+        })
+        .await
     }
 
     /// Commit the exact received response, terminal receipt, forensic outbox
@@ -407,6 +460,7 @@ impl Ledger {
         content_type: Option<String>,
         body: Vec<u8>,
     ) -> rusqlite::Result<ServerExecutionCompleted> {
+        let binding = binding.clone();
         let execution_id = binding.execution_id();
         let outbox_event_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
@@ -434,63 +488,65 @@ impl Ledger {
         });
         let receipt_json = receipt.to_string();
         let now = Utc::now().to_rfc3339();
-        let mut conn = self.conn.lock().await;
-        let tx = conn.transaction()?;
-        let changed = tx.execute(
-            "UPDATE server_executions
+        self.with_connection(move |conn| {
+            let tx = conn.transaction()?;
+            let changed = tx.execute(
+                "UPDATE server_executions
              SET state = 'completed', response_status = ?1, response_content_type = ?2,
                  response_body = ?3, result_sha256 = ?4, receipt_json = ?5, completed_at = ?6,
                  reconciliation_state = 'resolved', last_reconciled_at = ?6,
                  reconciliation_error = NULL, reconciliation_resolved_at = ?6
              WHERE agent_id = ?7 AND idempotency_id = ?8 AND state = 'in_flight'
                AND effective_request_sha256 = ?9",
-            rusqlite::params![
+                rusqlite::params![
+                    status,
+                    content_type,
+                    body,
+                    result_sha256,
+                    receipt_json,
+                    now,
+                    binding.agent_id,
+                    binding.idempotency_id.to_string(),
+                    binding.effective_request_sha256,
+                ],
+            )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            tx.execute(
+                "INSERT INTO server_execution_outbox
+             (event_id, execution_id, payload_json, created_at, delivered_at)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+                rusqlite::params![
+                    outbox_event_id.to_string(),
+                    execution_id.to_string(),
+                    receipt_json,
+                    now,
+                ],
+            )?;
+            append_on_connection(
+                &tx,
+                LogRequest {
+                    agent_id: binding.agent_id.clone(),
+                    method: binding.method.clone(),
+                    intent_category: "ServerExecutionCompleted".to_string(),
+                    authorized: true,
+                    reasoning: "durable server execution result and receipt committed".to_string(),
+                    policy_decision: Some(receipt),
+                    correlation_id: Some(binding.correlation_id.clone()),
+                },
+            )?;
+            tx.commit()?;
+            Ok(ServerExecutionCompleted {
+                execution_id: execution_id.to_string(),
                 status,
                 content_type,
                 body,
                 result_sha256,
                 receipt_json,
-                now,
-                binding.agent_id,
-                binding.idempotency_id.to_string(),
-                binding.effective_request_sha256,
-            ],
-        )?;
-        if changed != 1 {
-            return Err(rusqlite::Error::QueryReturnedNoRows);
-        }
-        tx.execute(
-            "INSERT INTO server_execution_outbox
-             (event_id, execution_id, payload_json, created_at, delivered_at)
-             VALUES (?1, ?2, ?3, ?4, ?4)",
-            rusqlite::params![
-                outbox_event_id.to_string(),
-                execution_id.to_string(),
-                receipt_json,
-                now,
-            ],
-        )?;
-        append_on_connection(
-            &tx,
-            LogRequest {
-                agent_id: binding.agent_id.clone(),
-                method: binding.method.clone(),
-                intent_category: "ServerExecutionCompleted".to_string(),
-                authorized: true,
-                reasoning: "durable server execution result and receipt committed".to_string(),
-                policy_decision: Some(receipt),
-                correlation_id: Some(binding.correlation_id.clone()),
-            },
-        )?;
-        tx.commit()?;
-        Ok(ServerExecutionCompleted {
-            execution_id: execution_id.to_string(),
-            status,
-            content_type,
-            body,
-            result_sha256,
-            receipt_json,
+            })
         })
+        .await
     }
 
     /// Periodically classify only abandoned intents owned by a prior process.
@@ -528,9 +584,10 @@ impl Ledger {
     async fn reconcile_server_executions_at(&self, now: DateTime<Utc>) -> rusqlite::Result<u64> {
         let cutoff = (now - chrono::Duration::seconds(300)).to_rfc3339();
         let now = now.to_rfc3339();
-        let mut conn = self.conn.lock().await;
-        let tx = conn.transaction()?;
-        let rows = {
+        let instance_id = self.instance_id.clone();
+        self.with_connection(move |conn| {
+            let tx = conn.transaction()?;
+            let rows = {
             let mut stmt = tx.prepare(
                 "SELECT execution_id, agent_id, idempotency_id, correlation_id, method,
                         tool_name, submitted_request_sha256, effective_request_sha256
@@ -540,7 +597,7 @@ impl Ledger {
                     AND owner_instance IS NOT NULL AND owner_instance <> ?2
                   ORDER BY created_at LIMIT 256",
             )?;
-            stmt.query_map(rusqlite::params![cutoff, self.instance_id], |row| {
+            stmt.query_map(rusqlite::params![cutoff, instance_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -553,8 +610,8 @@ impl Ledger {
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        for (
+            };
+            for (
             execution_id,
             agent_id,
             idempotency_id,
@@ -563,8 +620,8 @@ impl Ledger {
             tool_name,
             submitted_request_sha256,
             effective_request_sha256,
-        ) in &rows
-        {
+            ) in &rows
+            {
             let event_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
                 format!("clavenar.server-execution/v1\0reconciliation\0{execution_id}\0uncertain")
@@ -614,27 +671,33 @@ impl Ledger {
                     correlation_id: Some(correlation_id.clone()),
                 },
             )?;
-        }
-        tx.commit()?;
-        Ok(rows.len() as u64)
+            }
+            tx.commit()?;
+            Ok(rows.len() as u64)
+        })
+        .await
     }
 
     async fn refresh_forensic_metrics(&self) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().await;
-        let (ready, oldest): (i64, Option<String>) = conn.query_row(
-            "SELECT COUNT(*), MIN(created_at) FROM server_execution_outbox
-              WHERE delivered_at IS NULL",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let (pending, missing): (i64, i64) = conn.query_row(
-            "SELECT COALESCE(SUM(CASE WHEN reconciliation_state='pending' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN reconciliation_state='pending'
-                        AND julianday(created_at) <= julianday('now', '-300 seconds') THEN 1 ELSE 0 END), 0)
-               FROM server_executions",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
+        let (ready, oldest, pending, missing) = self
+            .with_connection(|conn| {
+                let (ready, oldest): (i64, Option<String>) = conn.query_row(
+                    "SELECT COUNT(*), MIN(created_at) FROM server_execution_outbox
+                      WHERE delivered_at IS NULL",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let (pending, missing): (i64, i64) = conn.query_row(
+                    "SELECT COALESCE(SUM(CASE WHEN reconciliation_state='pending' THEN 1 ELSE 0 END), 0),
+                            COALESCE(SUM(CASE WHEN reconciliation_state='pending'
+                                AND julianday(created_at) <= julianday('now', '-300 seconds') THEN 1 ELSE 0 END), 0)
+                       FROM server_executions",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                Ok((ready, oldest, pending, missing))
+            })
+            .await?;
         let age = oldest
             .as_deref()
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
@@ -673,48 +736,50 @@ impl Ledger {
     /// `verify_chain` does the same; both share the canonical-JSON order
     /// in `HashableEntry` so they cross-validate.
     pub async fn verify(&self) -> rusqlite::Result<VerifyResult> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT id, seq, timestamp, agent_id, method, intent_category, authorized,
+        self.with_connection(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, seq, timestamp, agent_id, method, intent_category, authorized,
                     reasoning, policy_decision, prev_hash, entry_hash, chain_version,
                     correlation_id
              FROM entries ORDER BY seq ASC",
-        )?;
-        let mut rows = stmt.query([])?;
+            )?;
+            let mut rows = stmt.query([])?;
 
-        let mut expected_prev = GENESIS_PREV_HASH.to_string();
-        let mut count = 0usize;
-        let mut first_invalid: Option<i64> = None;
-        let mut unsupported_chain_version: Option<i64> = None;
+            let mut expected_prev = GENESIS_PREV_HASH.to_string();
+            let mut count = 0usize;
+            let mut first_invalid: Option<i64> = None;
+            let mut unsupported_chain_version: Option<i64> = None;
 
-        while let Some(row) = rows.next()? {
-            let entry = row_to_entry(row)?;
-            // Chain-version dispatch: if this row was written under a chain
-            // version this binary doesn't know, stop the walk and
-            // surface the version separately. We can't validate any
-            // row that chains off an unverifiable hash anyway.
-            let recomputed = match recompute_for_version(entry.chain_version, &entry) {
-                Some(h) => h,
-                None => {
-                    unsupported_chain_version = Some(entry.chain_version);
+            while let Some(row) = rows.next()? {
+                let entry = row_to_entry(row)?;
+                // Chain-version dispatch: if this row was written under a chain
+                // version this binary doesn't know, stop the walk and
+                // surface the version separately. We can't validate any
+                // row that chains off an unverifiable hash anyway.
+                let recomputed = match recompute_for_version(entry.chain_version, &entry) {
+                    Some(h) => h,
+                    None => {
+                        unsupported_chain_version = Some(entry.chain_version);
+                        break;
+                    }
+                };
+
+                if entry.prev_hash != expected_prev || recomputed != entry.entry_hash {
+                    first_invalid = Some(entry.seq);
                     break;
                 }
-            };
-
-            if entry.prev_hash != expected_prev || recomputed != entry.entry_hash {
-                first_invalid = Some(entry.seq);
-                break;
+                expected_prev = entry.entry_hash;
+                count += 1;
             }
-            expected_prev = entry.entry_hash;
-            count += 1;
-        }
 
-        Ok(VerifyResult {
-            valid: first_invalid.is_none() && unsupported_chain_version.is_none(),
-            entries_checked: count,
-            first_invalid_seq: first_invalid,
-            unsupported_chain_version,
+            Ok(VerifyResult {
+                valid: first_invalid.is_none() && unsupported_chain_version.is_none(),
+                entries_checked: count,
+                first_invalid_seq: first_invalid,
+                unsupported_chain_version,
+            })
         })
+        .await
     }
 
     /// Park a yellow-tier request awaiting human review. Inserts one
@@ -723,38 +788,40 @@ impl Ledger {
     /// with `intent_category="PendingReview", authorized=false` so the
     /// forensic chain reflects the park.
     pub async fn park_pending(&self, req: ParkRequest) -> rusqlite::Result<Pending> {
-        let conn = self.conn.lock().await;
-        let requested_at = Utc::now();
-        let review_reasons_json =
-            serde_json::to_string(&req.review_reasons).unwrap_or_else(|_| "[]".to_string());
-        conn.execute(
-            "INSERT INTO pendings (correlation_id, tenant, agent_id, tool_type, method,
+        self.with_connection(move |conn| {
+            let requested_at = Utc::now();
+            let review_reasons_json =
+                serde_json::to_string(&req.review_reasons).unwrap_or_else(|_| "[]".to_string());
+            conn.execute(
+                "INSERT INTO pendings (correlation_id, tenant, agent_id, tool_type, method,
                                    review_reasons_json, requested_at, callback_url)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
-                req.correlation_id,
-                req.tenant,
-                req.agent_id,
-                req.tool_type,
-                req.method,
-                review_reasons_json,
-                requested_at.to_rfc3339(),
-                req.callback_url,
-            ],
-        )?;
-        Ok(Pending {
-            correlation_id: req.correlation_id,
-            tenant: req.tenant,
-            agent_id: req.agent_id,
-            tool_type: req.tool_type,
-            method: req.method,
-            review_reasons: req.review_reasons,
-            requested_at,
-            decided_at: None,
-            decision: None,
-            decider_note: None,
-            callback_url: req.callback_url,
+                rusqlite::params![
+                    req.correlation_id,
+                    req.tenant,
+                    req.agent_id,
+                    req.tool_type,
+                    req.method,
+                    review_reasons_json,
+                    requested_at.to_rfc3339(),
+                    req.callback_url,
+                ],
+            )?;
+            Ok(Pending {
+                correlation_id: req.correlation_id,
+                tenant: req.tenant,
+                agent_id: req.agent_id,
+                tool_type: req.tool_type,
+                method: req.method,
+                review_reasons: req.review_reasons,
+                requested_at,
+                decided_at: None,
+                decision: None,
+                decider_note: None,
+                callback_url: req.callback_url,
+            })
         })
+        .await
     }
 
     /// Record an operator decision against a pending row. Returns the
@@ -799,55 +866,55 @@ impl Ledger {
         if decision != "allow" && decision != "deny" {
             return Err(DecideError::InvalidDecision(decision.to_string()));
         }
-        let conn = self.conn.lock().await;
-        // SELECT + UPDATE under the single Mutex<Connection> lock is
-        // serialised, so no race between read-decision-state and
-        // write-decision. The `decided_at IS NULL` guard in the UPDATE
-        // is belt-and-suspenders.
-        let pending = {
-            let mut stmt = conn.prepare(
-                "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
+        let correlation_id = correlation_id.to_string();
+        let tenant = tenant.map(str::to_string);
+        let decision = decision.to_string();
+        let note = note.map(str::to_string);
+        self.with_connection_result(move |conn| {
+            // SELECT + UPDATE under the single connection worker is
+            // serialised, so no race exists between the state read and write.
+            let pending = {
+                let mut stmt = conn.prepare(
+                    "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
                         requested_at, decided_at, decision, decider_note, callback_url, tenant
                  FROM pendings
                  WHERE correlation_id = ?1 AND (?2 IS NULL OR tenant = ?2)",
-            )?;
-            let mut rows = stmt.query(rusqlite::params![correlation_id, tenant])?;
-            match rows.next()? {
-                Some(row) => row_to_pending(row)?,
-                None => return Err(DecideError::NotFound),
+                )?;
+                let mut rows = stmt.query(rusqlite::params![correlation_id, tenant])?;
+                match rows.next()? {
+                    Some(row) => row_to_pending(row)?,
+                    None => return Err(DecideError::NotFound),
+                }
+            };
+            if pending.decision.is_some() {
+                return Err(DecideError::AlreadyDecided);
             }
-        };
-        if pending.decision.is_some() {
-            return Err(DecideError::AlreadyDecided);
-        }
 
-        let decided_at = Utc::now();
-        let rows_affected = conn.execute(
-            "UPDATE pendings SET decided_at = ?1, decision = ?2, decider_note = ?3
+            let decided_at = Utc::now();
+            let rows_affected = conn.execute(
+                "UPDATE pendings SET decided_at = ?1, decision = ?2, decider_note = ?3
              WHERE correlation_id = ?4 AND decided_at IS NULL
                AND (?5 IS NULL OR tenant = ?5)",
-            rusqlite::params![
-                decided_at.to_rfc3339(),
-                decision,
-                note,
-                correlation_id,
-                tenant,
-            ],
-        )?;
-        if rows_affected == 0 {
-            // Belt-and-suspenders: under the connection mutex this
-            // should be unreachable, but if it ever fires it means a
-            // concurrent decider got there first — surface as
-            // AlreadyDecided rather than silently no-op'ing.
-            return Err(DecideError::AlreadyDecided);
-        }
+                rusqlite::params![
+                    decided_at.to_rfc3339(),
+                    decision,
+                    note,
+                    correlation_id,
+                    tenant,
+                ],
+            )?;
+            if rows_affected == 0 {
+                return Err(DecideError::AlreadyDecided);
+            }
 
-        Ok(Pending {
-            decided_at: Some(decided_at),
-            decision: Some(decision.to_string()),
-            decider_note: note.map(str::to_string),
-            ..pending
+            Ok(Pending {
+                decided_at: Some(decided_at),
+                decision: Some(decision),
+                decider_note: note,
+                ..pending
+            })
         })
+        .await
     }
 
     /// List pending rows filtered by decision state, ordered by
@@ -861,25 +928,26 @@ impl Ledger {
         limit: u32,
         sort: PendingSort,
     ) -> rusqlite::Result<Vec<Pending>> {
-        let conn = self.conn.lock().await;
-        let where_clause = match filter {
-            PendingFilter::Parked => "WHERE decided_at IS NULL",
-            PendingFilter::Decided => "WHERE decided_at IS NOT NULL",
-            PendingFilter::All => "",
-        };
-        let order_dir = match sort {
-            PendingSort::Oldest => "ASC",
-            PendingSort::Newest => "DESC",
-        };
-        let sql = format!(
-            "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
-                    requested_at, decided_at, decision, decider_note, callback_url, tenant
-             FROM pendings {} ORDER BY requested_at {} LIMIT ?1",
-            where_clause, order_dir
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map([limit], row_to_pending)?;
-        rows.collect()
+        self.with_connection(move |conn| {
+            let where_clause = match filter {
+                PendingFilter::Parked => "WHERE decided_at IS NULL",
+                PendingFilter::Decided => "WHERE decided_at IS NOT NULL",
+                PendingFilter::All => "",
+            };
+            let order_dir = match sort {
+                PendingSort::Oldest => "ASC",
+                PendingSort::Newest => "DESC",
+            };
+            let sql = format!(
+                "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
+                        requested_at, decided_at, decision, decider_note, callback_url, tenant
+                 FROM pendings {where_clause} ORDER BY requested_at {order_dir} LIMIT ?1"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([limit], row_to_pending)?;
+            rows.collect()
+        })
+        .await
     }
 
     /// List only rows belonging to the authenticated operator tenant.
@@ -890,43 +958,49 @@ impl Ledger {
         sort: PendingSort,
         tenant: &str,
     ) -> rusqlite::Result<Vec<Pending>> {
-        let conn = self.conn.lock().await;
-        let decision_predicate = match filter {
-            PendingFilter::Parked => "AND decided_at IS NULL",
-            PendingFilter::Decided => "AND decided_at IS NOT NULL",
-            PendingFilter::All => "",
-        };
-        let order_dir = match sort {
-            PendingSort::Oldest => "ASC",
-            PendingSort::Newest => "DESC",
-        };
-        let sql = format!(
-            "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
-                    requested_at, decided_at, decision, decider_note, callback_url, tenant
-             FROM pendings
-             WHERE tenant = ?1 {decision_predicate}
-             ORDER BY requested_at {order_dir} LIMIT ?2"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params![tenant, limit], row_to_pending)?;
-        rows.collect()
+        let tenant = tenant.to_string();
+        self.with_connection(move |conn| {
+            let decision_predicate = match filter {
+                PendingFilter::Parked => "AND decided_at IS NULL",
+                PendingFilter::Decided => "AND decided_at IS NOT NULL",
+                PendingFilter::All => "",
+            };
+            let order_dir = match sort {
+                PendingSort::Oldest => "ASC",
+                PendingSort::Newest => "DESC",
+            };
+            let sql = format!(
+                "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
+                        requested_at, decided_at, decision, decider_note, callback_url, tenant
+                 FROM pendings
+                 WHERE tenant = ?1 {decision_predicate}
+                 ORDER BY requested_at {order_dir} LIMIT ?2"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params![tenant, limit], row_to_pending)?;
+            rows.collect()
+        })
+        .await
     }
 
     /// Look up a pending by correlation id. Returns `None` if no such
     /// row exists. The pending row may be already-decided — callers
     /// inspect `decision` to tell.
     pub async fn get_pending(&self, correlation_id: &str) -> rusqlite::Result<Option<Pending>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
-                    requested_at, decided_at, decision, decider_note, callback_url, tenant
-             FROM pendings WHERE correlation_id = ?1",
-        )?;
-        let mut rows = stmt.query([correlation_id])?;
-        match rows.next()? {
-            Some(row) => Ok(Some(row_to_pending(row)?)),
-            None => Ok(None),
-        }
+        let correlation_id = correlation_id.to_string();
+        self.with_connection(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
+                        requested_at, decided_at, decision, decider_note, callback_url, tenant
+                 FROM pendings WHERE correlation_id = ?1",
+            )?;
+            let mut rows = stmt.query([correlation_id])?;
+            match rows.next()? {
+                Some(row) => Ok(Some(row_to_pending(row)?)),
+                None => Ok(None),
+            }
+        })
+        .await
     }
 
     /// Look up a pending through the issuing tenant/agent partition.
@@ -937,32 +1011,40 @@ impl Ledger {
         tenant: &str,
         agent_id: &str,
     ) -> rusqlite::Result<Option<Pending>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
-                    requested_at, decided_at, decision, decider_note, callback_url, tenant
-             FROM pendings
-             WHERE correlation_id = ?1 AND tenant = ?2 AND agent_id = ?3",
-        )?;
-        let mut rows = stmt.query(rusqlite::params![correlation_id, tenant, agent_id])?;
-        match rows.next()? {
-            Some(row) => Ok(Some(row_to_pending(row)?)),
-            None => Ok(None),
-        }
+        let correlation_id = correlation_id.to_string();
+        let tenant = tenant.to_string();
+        let agent_id = agent_id.to_string();
+        self.with_connection(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT correlation_id, agent_id, tool_type, method, review_reasons_json,
+                        requested_at, decided_at, decision, decider_note, callback_url, tenant
+                 FROM pendings
+                 WHERE correlation_id = ?1 AND tenant = ?2 AND agent_id = ?3",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![correlation_id, tenant, agent_id])?;
+            match rows.next()? {
+                Some(row) => Ok(Some(row_to_pending(row)?)),
+                None => Ok(None),
+            }
+        })
+        .await
     }
 
     /// Return every entry for `agent_id`, in seq order. Used by `audit`
     /// CLI subcommand.
     pub async fn entries_for_agent(&self, agent_id: &str) -> rusqlite::Result<Vec<LedgerEntry>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT id, seq, timestamp, agent_id, method, intent_category, authorized,
-                    reasoning, policy_decision, prev_hash, entry_hash, chain_version,
-                    correlation_id
-             FROM entries WHERE agent_id = ?1 ORDER BY seq ASC",
-        )?;
-        let rows = stmt.query_map([agent_id], row_to_entry)?;
-        rows.collect()
+        let agent_id = agent_id.to_string();
+        self.with_connection(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, seq, timestamp, agent_id, method, intent_category, authorized,
+                        reasoning, policy_decision, prev_hash, entry_hash, chain_version,
+                        correlation_id
+                 FROM entries WHERE agent_id = ?1 ORDER BY seq ASC",
+            )?;
+            let rows = stmt.query_map([agent_id], row_to_entry)?;
+            rows.collect()
+        })
+        .await
     }
 
     /// Aggregate observe-mode verdict rows for the graduation report.
@@ -972,66 +1054,68 @@ impl Ledger {
         &self,
         since: Option<DateTime<Utc>>,
     ) -> rusqlite::Result<GraduationStats> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT intent_category, authorized, agent_id, timestamp
+        self.with_connection(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT intent_category, authorized, agent_id, timestamp
              FROM entries
              WHERE (?1 IS NULL OR timestamp >= ?1)
              ORDER BY seq ASC",
-        )?;
-        let since_str = since.map(|s| s.to_rfc3339());
-        let rows = stmt.query_map([since_str], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)? != 0,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
+            )?;
+            let since_str = since.map(|s| s.to_rfc3339());
+            let rows = stmt.query_map([since_str], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? != 0,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
 
-        let mut stats = GraduationStats {
-            total: 0,
-            would_deny: 0,
-            would_pend: 0,
-            allowed: 0,
-            by_intent: Vec::new(),
-            top_agents: Vec::new(),
-            window_start: since,
-            window_end: None,
-        };
-        let mut intent_counts: BTreeMap<String, u64> = BTreeMap::new();
-        let mut agent_counts: BTreeMap<String, u64> = BTreeMap::new();
-        let mut latest: Option<DateTime<Utc>> = None;
+            let mut stats = GraduationStats {
+                total: 0,
+                would_deny: 0,
+                would_pend: 0,
+                allowed: 0,
+                by_intent: Vec::new(),
+                top_agents: Vec::new(),
+                window_start: since,
+                window_end: None,
+            };
+            let mut intent_counts: BTreeMap<String, u64> = BTreeMap::new();
+            let mut agent_counts: BTreeMap<String, u64> = BTreeMap::new();
+            let mut latest: Option<DateTime<Utc>> = None;
 
-        for row in rows {
-            let (intent, authorized, agent_id, ts) = row?;
-            stats.total += 1;
-            if authorized {
-                stats.allowed += 1;
-            }
-            if WOULD_DENY_INTENTS.contains(&intent.as_str()) {
-                stats.would_deny += 1;
-            } else if intent == "PendingReview" {
-                stats.would_pend += 1;
-            }
-            *intent_counts.entry(intent).or_insert(0) += 1;
-            *agent_counts.entry(agent_id).or_insert(0) += 1;
-            if let Ok(parsed) = DateTime::parse_from_rfc3339(&ts) {
-                let parsed = parsed.with_timezone(&Utc);
-                if latest.is_none_or(|cur| parsed > cur) {
-                    latest = Some(parsed);
+            for row in rows {
+                let (intent, authorized, agent_id, ts) = row?;
+                stats.total += 1;
+                if authorized {
+                    stats.allowed += 1;
+                }
+                if WOULD_DENY_INTENTS.contains(&intent.as_str()) {
+                    stats.would_deny += 1;
+                } else if intent == "PendingReview" {
+                    stats.would_pend += 1;
+                }
+                *intent_counts.entry(intent).or_insert(0) += 1;
+                *agent_counts.entry(agent_id).or_insert(0) += 1;
+                if let Ok(parsed) = DateTime::parse_from_rfc3339(&ts) {
+                    let parsed = parsed.with_timezone(&Utc);
+                    if latest.is_none_or(|cur| parsed > cur) {
+                        latest = Some(parsed);
+                    }
                 }
             }
-        }
 
-        stats.window_end = latest;
-        stats.by_intent = intent_counts.into_iter().collect();
-        // Top agents by count desc, then agent_id asc for stable output.
-        let mut agents: Vec<(String, u64)> = agent_counts.into_iter().collect();
-        agents.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        agents.truncate(TOP_AGENTS_LIMIT);
-        stats.top_agents = agents;
-        Ok(stats)
+            stats.window_end = latest;
+            stats.by_intent = intent_counts.into_iter().collect();
+            // Top agents by count desc, then agent_id asc for stable output.
+            let mut agents: Vec<(String, u64)> = agent_counts.into_iter().collect();
+            agents.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            agents.truncate(TOP_AGENTS_LIMIT);
+            stats.top_agents = agents;
+            Ok(stats)
+        })
+        .await
     }
 }
 
@@ -1491,6 +1575,32 @@ mod tests {
         assert_eq!(v.entries_checked, 5);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_sqlite_work_does_not_block_the_async_runtime() {
+        let ledger = Arc::new(Ledger::open(":memory:").unwrap());
+        let connection = Arc::clone(&ledger.conn);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            let _guard = connection.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        });
+        locked_rx.recv().unwrap();
+
+        let writer = {
+            let ledger = Arc::clone(&ledger);
+            tokio::spawn(async move { ledger.append(sample("queued", true)).await })
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            tokio::time::sleep(std::time::Duration::from_millis(5)),
+        )
+        .await
+        .expect("SQLite contention must not occupy the async runtime");
+        blocker.join().unwrap();
+        writer.await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn empty_ledger_verifies() {
         let ledger = Ledger::open(":memory:").unwrap();
@@ -1527,7 +1637,7 @@ mod tests {
         let ledger = Ledger::open(":memory:").unwrap();
         ledger.append(sample("a", true)).await.unwrap();
         {
-            let conn = ledger.conn.lock().await;
+            let conn = ledger.conn.lock().unwrap();
             conn.execute("UPDATE entries SET chain_version = 99 WHERE seq = 1", [])
                 .unwrap();
         }
@@ -1756,7 +1866,7 @@ mod tests {
         // no longer match the stored entry_hash, so verify must report
         // `valid=false` and pinpoint seq=2 as the first invalid row.
         {
-            let conn = ledger.conn.lock().await;
+            let conn = ledger.conn.lock().unwrap();
             conn.execute(
                 "UPDATE entries SET reasoning = 'tampered' WHERE seq = 2",
                 [],
@@ -1797,7 +1907,7 @@ mod tests {
             let row = snapshot
                 .conn
                 .lock()
-                .await
+                .unwrap()
                 .query_row(
                     "SELECT entry_hash FROM entries WHERE seq = ?1",
                     [orig.seq],
@@ -1920,16 +2030,17 @@ mod tests {
             ledger.inspect_server_execution(&binding).await.unwrap(),
             ServerExecutionOutcome::Completed(_)
         ));
-        let conn = ledger.conn.lock().await;
-        let state: String = conn
-            .query_row(
-                "SELECT reconciliation_state FROM server_executions",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(state, "resolved");
-        drop(conn);
+        {
+            let conn = ledger.conn.lock().unwrap();
+            let state: String = conn
+                .query_row(
+                    "SELECT reconciliation_state FROM server_executions",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(state, "resolved");
+        }
         assert!(ledger.verify().await.unwrap().valid);
     }
 
@@ -1966,20 +2077,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(changed, 1);
-        let conn = restarted.conn.lock().await;
-        let retained: (String, i64, i64, i64) = conn
-            .query_row(
-                "SELECT reconciliation_state, reconciliation_attempts,
-                        (SELECT COUNT(*) FROM server_execution_outbox),
-                        (SELECT COUNT(*) FROM entries
-                          WHERE intent_category='ServerExecutionUncertain')
-                   FROM server_executions",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(retained, ("uncertain".to_string(), 1, 1, 1));
-        drop(conn);
+        {
+            let conn = restarted.conn.lock().unwrap();
+            let retained: (String, i64, i64, i64) = conn
+                .query_row(
+                    "SELECT reconciliation_state, reconciliation_attempts,
+                            (SELECT COUNT(*) FROM server_execution_outbox),
+                            (SELECT COUNT(*) FROM entries
+                              WHERE intent_category='ServerExecutionUncertain')
+                       FROM server_executions",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(retained, ("uncertain".to_string(), 1, 1, 1));
+        }
         assert_eq!(
             restarted
                 .reconcile_server_executions_at(Utc::now() + chrono::Duration::minutes(20))

@@ -18,9 +18,9 @@
 use regorus::{Engine, Value as RegoValue};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as BlockingMutex};
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
 /// Input to a policy evaluation. Field-for-field compatible with the full
 /// edition's `clavenar_policy_engine::PolicyInput` so a `governance.rego`
@@ -66,7 +66,7 @@ pub struct PolicyDecision {
 /// `InProcessTracker` the full edition uses by default — Lite simply
 /// doesn't expose the NATS-KV alternative.
 pub struct VelocityTracker {
-    inner: Mutex<std::collections::HashMap<String, std::collections::VecDeque<Instant>>>,
+    inner: AsyncMutex<std::collections::HashMap<String, std::collections::VecDeque<Instant>>>,
     window: Duration,
 }
 
@@ -77,7 +77,7 @@ impl VelocityTracker {
 
     fn with_window(window: Duration) -> Self {
         Self {
-            inner: Mutex::new(std::collections::HashMap::new()),
+            inner: AsyncMutex::new(std::collections::HashMap::new()),
             window,
         }
     }
@@ -108,7 +108,8 @@ impl VelocityTracker {
 }
 
 pub struct PolicyEngine {
-    engine: Mutex<Engine>,
+    engine: Arc<BlockingMutex<Engine>>,
+    evaluation_permit: Arc<Semaphore>,
     tracker: Arc<VelocityTracker>,
 }
 
@@ -147,7 +148,11 @@ impl PolicyEngine {
         );
 
         Ok(Self {
-            engine: Mutex::new(engine),
+            engine: Arc::new(BlockingMutex::new(engine)),
+            // Regorus mutates its input between evaluations, so one engine is
+            // intentionally single-flight. The semaphore prevents a burst of
+            // requests from occupying Tokio's blocking pool while they wait.
+            evaluation_permit: Arc::new(Semaphore::new(1)),
             tracker: Arc::new(VelocityTracker::new(velocity_window_secs)),
         })
     }
@@ -178,51 +183,63 @@ impl PolicyEngine {
             }
         };
 
-        let mut guard = self.engine.lock().await;
-
-        let deny_with = |reason: String| PolicyDecision {
-            allow: false,
-            reasons: vec![reason],
-            review_reasons: Vec::new(),
+        let queued_at = Instant::now();
+        let permit = match Arc::clone(&self.evaluation_permit).acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                return deny_with("Policy engine worker is unavailable".into());
+            }
         };
-        let eval = |guard: &mut Engine, rule: &str, label: &str| -> Result<RegoValue, String> {
-            guard
-                .eval_rule(rule.to_string())
-                .map_err(|e| format!("Policy engine error (eval {}): {}", label, e))
-        };
-
-        if let Err(e) = guard.set_input_json(&input_json) {
-            return deny_with(format!("Policy engine error (set_input): {}", e));
-        }
-
-        let allow_value = match eval(&mut guard, "data.clavenar.authz.allow", "allow") {
-            Ok(v) => v,
-            Err(r) => return deny_with(r),
-        };
-        let deny_value = match eval(&mut guard, "data.clavenar.authz.deny", "deny") {
-            Ok(v) => v,
-            Err(r) => return deny_with(r),
-        };
-        let review_value = match eval(&mut guard, "data.clavenar.authz.review", "review") {
-            Ok(v) => v,
-            Err(r) => return deny_with(r),
-        };
-        drop(guard);
-
-        let allow = matches!(allow_value, RegoValue::Bool(true));
-        let mut reasons = extract_reasons(&deny_value);
-        let review_reasons = extract_reasons(&review_value);
-
-        if allow && reasons.is_empty() && review_reasons.is_empty() {
-            reasons.push("Deterministic policy check passed.".to_string());
-        }
-
-        PolicyDecision {
-            allow,
-            reasons,
-            review_reasons,
+        metrics::histogram!("clavenar_lite_policy_queue_seconds")
+            .record(queued_at.elapsed().as_secs_f64());
+        let engine = Arc::clone(&self.engine);
+        match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut guard = engine
+                .lock()
+                .map_err(|_| "Policy engine worker lock is poisoned".to_string())?;
+            evaluate_rego(&mut guard, &input_json)
+        })
+        .await
+        {
+            Ok(Ok(decision)) => decision,
+            Ok(Err(reason)) => deny_with(reason),
+            Err(error) => deny_with(format!("Policy engine worker failed: {error}")),
         }
     }
+}
+
+fn deny_with(reason: String) -> PolicyDecision {
+    PolicyDecision {
+        allow: false,
+        reasons: vec![reason],
+        review_reasons: Vec::new(),
+    }
+}
+
+fn evaluate_rego(engine: &mut Engine, input_json: &str) -> Result<PolicyDecision, String> {
+    let eval = |engine: &mut Engine, rule: &str, label: &str| -> Result<RegoValue, String> {
+        engine
+            .eval_rule(rule.to_string())
+            .map_err(|error| format!("Policy engine error (eval {label}): {error}"))
+    };
+    engine
+        .set_input_json(input_json)
+        .map_err(|error| format!("Policy engine error (set_input): {error}"))?;
+    let allow_value = eval(engine, "data.clavenar.authz.allow", "allow")?;
+    let deny_value = eval(engine, "data.clavenar.authz.deny", "deny")?;
+    let review_value = eval(engine, "data.clavenar.authz.review", "review")?;
+    let allow = matches!(allow_value, RegoValue::Bool(true));
+    let mut reasons = extract_reasons(&deny_value);
+    let review_reasons = extract_reasons(&review_value);
+    if allow && reasons.is_empty() && review_reasons.is_empty() {
+        reasons.push("Deterministic policy check passed.".to_string());
+    }
+    Ok(PolicyDecision {
+        allow,
+        reasons,
+        review_reasons,
+    })
 }
 
 /// Pull `Vec<String>` out of a regorus `Value::Set` or `Value::Array`,

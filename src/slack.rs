@@ -13,6 +13,7 @@
 //! failed Slack does not delay the agent's 202 response.
 
 use crate::ledger::Pending;
+use std::time::Duration;
 
 /// Format the in-Slack message body for a parked tool call. Plain
 /// markdown — Slack renders the backticks as inline code and the
@@ -47,7 +48,13 @@ pub fn format_pending_message(p: &Pending) -> String {
 /// failing the park on a flaky Slack would be the wrong tradeoff.
 pub async fn notify_pending_parked(http: &reqwest::Client, webhook_url: &str, pending: &Pending) {
     let body = serde_json::json!({ "text": format_pending_message(pending) });
-    match http.post(webhook_url).json(&body).send().await {
+    match http
+        .post(webhook_url)
+        .timeout(Duration::from_secs(5))
+        .json(&body)
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {}
         Ok(resp) => {
             tracing::warn!(
