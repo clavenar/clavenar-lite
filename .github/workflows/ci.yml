@@ -87,7 +87,12 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
+      - name: Prepare isolated Rust setup home
+        run: install -d -m 0700 "$RUNNER_TEMP/home-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$GITHUB_JOB"
+
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        env:
+          HOME: ${{ runner.temp }}/home-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         with:
           toolchain: 1.97.0
 
