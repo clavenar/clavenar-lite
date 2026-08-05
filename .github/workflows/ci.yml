@@ -81,6 +81,9 @@ jobs:
     # on review, on demand, and weekly as the advisory database changes.
     if: github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: self-hosted
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.ci/cargo-home-${{ github.run_id }}-${{ github.run_attempt }}-supply-chain
+      RUSTUP_HOME: ${{ github.workspace }}/.ci/rustup-home-${{ github.run_id }}-${{ github.run_attempt }}-supply-chain
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
@@ -93,7 +96,13 @@ jobs:
       - uses: cargo-bins/cargo-binstall@ead08b90bd7b2e6d81963fb9cf0b7239f66d5db4 # main
 
       - name: install cargo-deny + cargo-cyclonedx
-        run: cargo binstall --no-confirm cargo-deny@0.20.2 cargo-cyclonedx@0.5.9
+        run: |
+          # Runner services share their default Cargo home. Force materializes
+          # the pinned tools even if another job left stale install receipts.
+          cargo binstall --no-confirm --force cargo-deny@0.20.2 cargo-cyclonedx@0.5.9
+          test -x "$CARGO_HOME/bin/cargo-deny"
+          test -x "$CARGO_HOME/bin/cargo-cyclonedx"
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
 
       - name: cargo-deny check all
         run: cargo deny check all
