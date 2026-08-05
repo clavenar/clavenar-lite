@@ -1,6 +1,6 @@
 [package]
 name = "clavenar-lite"
-version = "0.12.1"
+version = "0.12.2"
 edition = "2024"
 authors = ["Vanteguard Labs <vanteguardlabs@gmail.com>"]
 description = "Community Edition of Clavenar — single-binary OSS proxy with embedded heuristic Brain, Rego policy engine, and SHA-256 hash-chained ledger."

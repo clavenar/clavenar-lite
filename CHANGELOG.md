@@ -6,6 +6,15 @@ project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-08-05
+
+### Changed
+
+- Isolate Regorus and SQLite work from the async runtime behind bounded
+  semaphores and expose queue pressure metrics.
+- Bound notification fan-out and Slack delivery with explicit concurrency and
+  request deadlines.
+
 ## [0.12.1] - 2026-07-28
 
 ### Changed
