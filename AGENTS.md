@@ -38,7 +38,16 @@ Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `
 - `src/target_validation.rs` — normalized scheme/IDNA host/effective-port/path
   boundary matching for callback allowlists, with local/non-public targets
   rejected before storage or delivery.
+- `src/hosted_safety.rs` / `src/hosted_safety_contract.rs` — fail-closed
+  hosted-profile requirements and the embedded
+  `clavenar.hosted-lite-safety/v1` contract.
+- `src/upstream_adapter.rs` — explicit raw-local versus bounded
+  `mcp-jsonrpc-v1` upstream exchange.
+- `src/outbound_callback.rs` / `src/outbound_resolution_contract.rs` —
+  bounded callback delivery and compiled DNS-pinning contract.
 - `src/supply_chain.rs` — pins first `tools/list`, diffs later ones → `tool_schema_poisoned` row.
+- `contracts/` — hosted safety, client migration, retry separation, rooted
+  targets, outbound pinning, and server-execution schemas/fixtures.
 - `policies/governance.rego` — bundled baseline (denylist, intent threshold, business-hours, velocity, wire-transfer review). `tests/proxy_integration.rs`. `scripts/{smoke-e2e,smoke-install}.sh`. `docs/SEQUENCES.md`.
 - Routes (port 8088): `GET /`,`/health`,`/readyz`,`/metrics`; `POST /mcp`; `GET /pending`, `GET /pending/{id}`, `POST /pending/{id}/decide`.
 
@@ -47,9 +56,13 @@ Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `
 - **Formatting is an owning-CI gate.** Run `cargo fmt --all -- --check`
   before pushing Rust changes; CI runs it before check, test, and clippy.
 
-- After adding or updating a feature, also update the relevant `MANUAL_TESTS*` file(s) when needed.
-
 - **Wire + chain are byte-compatible with the full edition.** A Lite-produced chain verifies under the production ledger; full-edition `governance.rego` runs verbatim here. Don't change the hash-chain serialization or the `PolicyInput` shape without matching the full edition.
+- **Decision and execution are distinct contracts.**
+  `clavenar.decision/v1` is side-effect-free. Durable
+  `clavenar.server-execution/v1` persists exact intent before one upstream
+  attempt, replays only retained completion bytes, and reports an interrupted
+  identity as uncertain without executing again. Unknown or mixed selectors
+  fail before policy, ledger, or upstream access.
 - Three verdicts: `200` allow / `403` deny (`security_violation`) / `202` park (`pending`). Observe mode passes everything through, still writes `authorized=false` rows, and adds `X-Clavenar-Would-Deny: true`. Every response (incl. 4xx/5xx) carries `X-Clavenar-Correlation-Id` + `X-Clavenar-Mode`.
 - Default mode is `enforce` (CLI/env default); README quickstarts set `observe` explicitly — keep that distinction intact.
 - `verify` exit codes are CI contracts: `0` valid, `1` runtime error, `2` for any invalid/unverifiable chain — tamper (the message points at the first bad seq) OR a row written under a newer `chain_version` this binary can't verify (message says "Upgrade", not tamper).
@@ -61,6 +74,9 @@ Run: single bin `clavenar-lite` (`clavenar-lite start …`); HTTP server binds `
   retaining hostname identity, and at most five manual redirects repeat the
   full allowlist/resolve/validate/pin sequence.
 - Rate-limit gate emits `429` + a `RateLimitDenied` ledger row + the `clavenar_lite_rate_limit_denied_total` counter; it runs before any brain/policy work.
+- **Blocking and best-effort work is bounded.** SQLite and Rego work run
+  behind semaphores on `spawn_blocking`; notification tasks have a fixed
+  in-flight cap and may be dropped rather than accumulating without bound.
 - `--verbose-verdicts` is a dev knob, OFF by default — it leaks detector logic to the caller; the binary logs a startup warning when on.
 - Dependency choices are load-bearing for the one-command static install: `reqwest` rustls-tls (no system openssl), `rusqlite` `bundled` (no system libsqlite). Don't reintroduce native-tls or a system-lib dep.
 - `[lints.rust] unreachable_pub = "warn"` — keep the module surface tight; don't widen visibility past what `lib.rs` needs to re-export.
